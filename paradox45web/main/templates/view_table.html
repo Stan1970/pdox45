@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Table: {{ table_name }}</h1>
+{% if error %}
+    <p style="color:red;">Error: {{ error }}</p>
+{% elif columns and rows %}
+    <table border="1" cellpadding="4" style="font-family: Courier New, monospace; background:#111; color:#EDEDED; border-collapse:collapse;">
+        <tr style="background:#444;">
+            {% for col in columns %}
+                <th>{{ col }}</th>
+            {% endfor %}
+        </tr>
+        {% for row in rows %}
+        <tr>
+            {% for cell in row %}
+                <td>{{ cell }}</td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </table>
+{% else %}
+    <p>No data found in this table.</p>
+{% endif %}
+{% endblock %}

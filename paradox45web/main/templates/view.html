@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>View Tables</h1>
+{% if tables %}
+    <ul>
+    {% for tbl in tables %}
+        <li>
+            <a href="{% url 'view_table' tbl %}">{{ tbl }}</a>
+        </li>
+    {% endfor %}
+    </ul>
+{% else %}
+    <p>No tables found in the database.</p>
+{% endif %}
+{% endblock %}
