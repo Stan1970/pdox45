@@ -10,7 +10,8 @@
 </ul>
 {% if structure %}
     <h2>Struktura tabulky: {{ table_name }}</h2>
-    <form>
+    <form method="post">
+    {% csrf_token %}
     <table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
         <tr>
             <th>ID</th>
@@ -30,8 +31,6 @@
                     <input type="number" name="value_{{ col.1 }}">
                 {% elif col.2 == "REAL" %}
                     <input type="number" step="any" name="value_{{ col.1 }}">
-                {% elif col.2 == "TEXT" %}
-                    <input type="text" name="value_{{ col.1 }}">
                 {% else %}
                     <input type="text" name="value_{{ col.1 }}">
                 {% endif %}
@@ -39,6 +38,25 @@
         </tr>
         {% endfor %}
     </table>
+    <button type="submit">Vytvoř ANSWER</button>
     </form>
+{% endif %}
+
+{% if answer_columns and answer_rows %}
+    <h2>Tabulka ANSWER</h2>
+    <table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
+        <tr>
+            {% for col in answer_columns %}
+                <th>{{ col }}</th>
+            {% endfor %}
+        </tr>
+        {% for row in answer_rows %}
+        <tr>
+            {% for cell in row %}
+                <td>{{ cell }}</td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </table>
 {% endif %}
 {% endblock %}
