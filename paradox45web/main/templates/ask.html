@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>ASK: Seznam tabulek</h1>
+<ul>
+    {% for tbl in tables %}
+        <li>
+            <a href="?table={{ tbl }}">{{ tbl }}</a>
+        </li>
+    {% endfor %}
+</ul>
+{% if structure %}
+    <h2>Struktura tabulky: {{ table_name }}</h2>
+    <form>
+    <table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
+        <tr>
+            <th>ID</th>
+            <th>Jméno</th>
+            <th>Typ</th>
+            <th>Vybrat</th>
+            <th>Hodnota</th>
+        </tr>
+        {% for col in structure %}
+        <tr>
+            <td>{{ col.0 }}</td>
+            <td>{{ col.1 }}</td>
+            <td>{{ col.2 }}</td>
+            <td><input type="checkbox" name="select_{{ col.1 }}"></td>
+            <td>
+                {% if col.2 == "INTEGER" %}
+                    <input type="number" name="value_{{ col.1 }}">
+                {% elif col.2 == "REAL" %}
+                    <input type="number" step="any" name="value_{{ col.1 }}">
+                {% elif col.2 == "TEXT" %}
+                    <input type="text" name="value_{{ col.1 }}">
+                {% else %}
+                    <input type="text" name="value_{{ col.1 }}">
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    </form>
+{% endif %}
+{% endblock %}

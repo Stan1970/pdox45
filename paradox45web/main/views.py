@@ -4,6 +4,20 @@ import sqlite3
 def home(request):
     return render(request, 'home.html')
 
+def ask(request):
+    table_name = request.GET.get('table')
+    conn = sqlite3.connect('db.sqlite3')
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [row[0] for row in cursor.fetchall()]
+    structure = None
+    if table_name:
+        cursor.execute(f'PRAGMA table_info("{table_name}")')
+        structure = cursor.fetchall()
+    conn.close()
+    return render(request, 'ask.html', {'tables': tables, 'structure': structure, 'table_name': table_name})
+
+
 def view(request):
     # Seznam všech tabulek v SQLite
     conn = sqlite3.connect('db.sqlite3')
