@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
+{% load ask_extras %}.
+
 <h1>ASK: Seznam tabulek</h1>
 <ul>
     {% for tbl in tables %}
@@ -58,5 +60,23 @@
         </tr>
         {% endfor %}
     </table>
+
+<form method="post">
+    {% csrf_token %}
+    {% for col in answer_columns %}
+        <input type="hidden" name="select_{{ col }}" value="on">
+        <input type="hidden" name="value_{{ col }}" value="{{ request.POST|get_value:col }}">
+    {% endfor %}
+    <label>Zvol název pro uložení:</label>
+    <input type="text" name="save_name" required>
+    <button type="submit" name="save_answer">Uložit answer</button>
+</form>
+
+    {% if save_msg %}
+        <p style="color:yellow;">{{ save_msg }}</p>
+    {% endif %}
 {% endif %}
+
+
+
 {% endblock %}
