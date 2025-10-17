@@ -11,37 +11,61 @@
     {% endfor %}
 </ul>
 {% if structure %}
-    <h2>Struktura tabulky: {{ table_name }}</h2>
-    <form method="post">
-    {% csrf_token %}
-    <table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
-        <tr>
-            <th>ID</th>
-            <th>Jméno</th>
-            <th>Typ</th>
-            <th>Vybrat</th>
-            <th>Hodnota</th>
-        </tr>
-        {% for col in structure %}
-        <tr>
-            <td>{{ col.0 }}</td>
-            <td>{{ col.1 }}</td>
-            <td>{{ col.2 }}</td>
-            <td><input type="checkbox" name="select_{{ col.1 }}"></td>
-            <td>
-                {% if col.2 == "INTEGER" %}
-                    <input type="number" name="value_{{ col.1 }}">
-                {% elif col.2 == "REAL" %}
-                    <input type="number" step="any" name="value_{{ col.1 }}">
-                {% else %}
-                    <input type="text" name="value_{{ col.1 }}">
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
-    <button type="submit">Vytvoř ANSWER</button>
-    </form>
+<h2>Table structure: {{ table_name }}</h2>
+<form method="post">
+{% csrf_token %}
+<table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
+    <tr>
+        <th>ID</th>
+        <th>Name</th>
+        <th>Type</th>
+        <th>
+            Select<br>
+            <input type="checkbox" id="select_all" onclick="toggleAll(this)">
+        </th>
+        <th>Value</th>
+        <th>Operator</th>
+    </tr>
+    {% for col in structure %}
+    <tr>
+        <td>{{ col.0 }}</td>
+        <td>{{ col.1 }}</td>
+        <td>{{ col.2 }}</td>
+        <td><input type="checkbox" name="select_{{ col.1 }}" class="select_one"></td>
+        <td>
+            {% if col.2 == "INTEGER" or col.2 == "REAL" %}
+                <input type="number" name="value_{{ col.1 }}">
+            {% else %}
+                <input type="text" name="value_{{ col.1 }}">
+            {% endif %}
+        </td>
+        <td>
+            {% if col.2 == "INTEGER" or col.2 == "REAL" %}
+                <select name="operator_{{ col.1 }}">
+                    <option value="=">=</option>
+                    <option value="<">&lt;</option>
+                    <option value=">">&gt;</option>
+                </select>
+            {% else %}
+                <select name="operator_{{ col.1 }}">
+                    <option value="exact">exact</option>
+                    <option value="startswith">starts with</option>
+                    <option value="contains">contains</option>
+                </select>
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+<button type="submit">Create ANSWER</button>
+</form>
+<script>
+    function toggleAll(source) {
+        const checkboxes = document.querySelectorAll('.select_one');
+        checkboxes.forEach(cb => cb.checked = source.checked);
+    }
+</script>
+
 {% endif %}
 
 {% if answer_columns and answer_rows %}
@@ -61,22 +85,20 @@
         {% endfor %}
     </table>
 
-<form method="post">
-    {% csrf_token %}
-    {% for col in answer_columns %}
-        <input type="hidden" name="select_{{ col }}" value="on">
-        <input type="hidden" name="value_{{ col }}" value="{{ request.POST|get_value:col }}">
-    {% endfor %}
-    <label>Zvol název pro uložení:</label>
-    <input type="text" name="save_name" required>
-    <button type="submit" name="save_answer">Uložit answer</button>
-</form>
+    <form method="post">
+        {% csrf_token %}
+        {% for col in answer_columns %}
+            <input type="hidden" name="select_{{ col }}" value="on">
+            <input type="hidden" name="value_{{ col }}" value="{{ request.POST|get_value:col }}">
+        {% endfor %}
+        <label>Zvol název pro uložení:</label>
+        <input type="text" name="save_name" required>
+        <button type="submit" name="save_answer">Uložit answer</button>
+    </form>
 
     {% if save_msg %}
         <p style="color:yellow;">{{ save_msg }}</p>
     {% endif %}
 {% endif %}
-
-
 
 {% endblock %}

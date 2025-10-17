@@ -1,5 +1,7 @@
 from django.shortcuts import render
 import sqlite3
+import os
+from django.conf import settings
 
 def home(request):
     return render(request, 'home.html')
@@ -20,7 +22,6 @@ def ask(request):
     if request.method == 'POST' and structure:
         # Rozlišení, zda jde o uložení nebo dotaz
         if 'save_answer' in request.POST:
-            # Získání vybraných sloupců z hidden polí
             selected = []
             filters = []
             params = []
@@ -29,9 +30,22 @@ def ask(request):
                 if request.POST.get(f'select_{col_name}'):
                     selected.append(col_name)
                     value = request.POST.get(f'value_{col_name}', '').strip()
+                    operator = request.POST.get(f'operator_{col_name}', '')
                     if value != '':
-                        filters.append(f'"{col_name}" = ?')
-                        params.append(value)
+                        if col[2] in ["INTEGER", "REAL"]:
+                            if operator in ['=', '<', '>']:
+                                filters.append(f'"{col_name}" {operator} ?')
+                                params.append(value)
+                        else:  # TEXT
+                            if operator == 'exact':
+                                filters.append(f'"{col_name}" = ?')
+                                params.append(value)
+                            elif operator == 'startswith':
+                                filters.append(f'"{col_name}" LIKE ?')
+                                params.append(f'{value}%')
+                            elif operator == 'contains':
+                                filters.append(f'"{col_name}" LIKE ?')
+                                params.append(f'%{value}%')
             if selected:
                 fields = ', '.join([f'"{name}"' for name in selected])
                 sql = f'SELECT {fields} FROM "{table_name}"'
@@ -53,7 +67,7 @@ def ask(request):
                     conn.commit()
                     save_msg = f'Tabulka "{save_name}" byla uložena.'
         else:
-            # Standardní dotaz
+            # Standardní dotaz s operátory
             selected = []
             filters = []
             params = []
@@ -62,9 +76,22 @@ def ask(request):
                 if request.POST.get(f'select_{col_name}'):
                     selected.append(col_name)
                     value = request.POST.get(f'value_{col_name}', '').strip()
+                    operator = request.POST.get(f'operator_{col_name}', '')
                     if value != '':
-                        filters.append(f'"{col_name}" = ?')
-                        params.append(value)
+                        if col[2] in ["INTEGER", "REAL"]:
+                            if operator in ['=', '<', '>']:
+                                filters.append(f'"{col_name}" {operator} ?')
+                                params.append(value)
+                        else:  # TEXT
+                            if operator == 'exact':
+                                filters.append(f'"{col_name}" = ?')
+                                params.append(value)
+                            elif operator == 'startswith':
+                                filters.append(f'"{col_name}" LIKE ?')
+                                params.append(f'{value}%')
+                            elif operator == 'contains':
+                                filters.append(f'"{col_name}" LIKE ?')
+                                params.append(f'%{value}%')
             if selected:
                 fields = ', '.join([f'"{name}"' for name in selected])
                 sql = f'SELECT {fields} FROM "{table_name}"'
@@ -84,7 +111,6 @@ def ask(request):
     })
 
 def view(request):
-    # Seznam všech tabulek v SQLite
     conn = sqlite3.connect('db.sqlite3')
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -112,7 +138,7 @@ def createtable(request):
     if request.method == 'POST':
         table_name = request.POST.get('table_name', '').strip()
         fields = []
-        for i in range(1, 11):  # max 10 polí
+        for i in range(1, 11):
             field_name = request.POST.get(f'field_name_{i}', '').strip()
             field_type = request.POST.get(f'field_type_{i}', '').strip()
             if field_name and field_type:
