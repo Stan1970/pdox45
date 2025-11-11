@@ -7,5 +7,5 @@ urlpatterns = [
     path('view/<str:table_name>/', views.view_table, name='view_table'),
     path('create/table/', views.createtable, name='createtable'),
     path('ask/', views.ask, name='ask'),  # nová URL pro ASK
-
+    path('import/', views.imports_view, name='import'),  # URL pro Import
 ]

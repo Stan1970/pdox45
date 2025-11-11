@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h2>Import</h2>
+<p>{{ msg }}</p>
+<form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <label for="file">Choose file to upload:</label>
+    <input type="file" id="file" name="file">
+    <button type="submit">Upload</button>
+</form>
+
+<hr>
+<h3>Imported files</h3>
+{% if imported_files %}
+<table border="1" cellpadding="6" cellspacing="0">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Size (KB)</th>
+            <th>Modified</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for f in imported_files %}
+        <tr>
+            <td>{{ f.name }}</td>
+            <td style="text-align:right">{{ f.size_kb }}</td>
+            <td>{{ f.mtime }}</td>
+            <td>
+                <!-- Convert form: používá button typu button a JS prompt pro zadání jména tabulky -->
+                <form method="post" style="display:inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="convert_file" value="{{ f.name }}">
+                    <input type="hidden" name="convert_table" value="">
+                    <button type="button" title="Convert (CSV/JSON)" style="background:none;border:none;cursor:pointer;color:#070;font-size:16px;margin-right:6px" onclick="return convertPrompt(this.form, '{{ f.name|escapejs }}');">🔁</button>
+                </form>
+
+                <!-- Delete form: potvrzení přes onclick -->
+                <form method="post" style="display:inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="delete_file" value="{{ f.name }}">
+                    <button type="submit" title="Delete" style="background:none;border:none;cursor:pointer;color:#c00;font-size:16px" onclick="return confirm('Delete file &quot;{{ f.name|escapejs }}&quot;? This action cannot be undone.');">🗑</button>
+                </form>
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No imported files found.</p>
+{% endif %}
+
+<script>
+function convertPrompt(form, fname) {
+    // suggested table name = filename without extension
+    var suggested = fname.replace(/\.[^/.]+$/, '');
+    var tbl = prompt('Enter table name (leave empty to use "' + suggested + '"):', suggested);
+    if (tbl === null) { // user cancelled
+        return false;
+    }
+    // set hidden input
+    if (form.elements['convert_table']) {
+        form.elements['convert_table'].value = tbl.trim();
+    }
+    var target = form.elements['convert_table'] && form.elements['convert_table'].value ? form.elements['convert_table'].value : suggested;
+    if (!confirm('Convert file "' + fname + '" into table "' + target + '"?')) {
+        return false;
+    }
+    form.submit();
+    return false;
+}
+</script>
+
+{% endblock %}

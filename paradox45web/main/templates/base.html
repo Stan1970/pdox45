@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Paradox 4.5 Web</title>
+    <title>DOX 1.0 Web</title>
     <style>
         body {
             margin: 0;
@@ -91,7 +91,7 @@
 </head>
 <body>
     <div class="menu-bar">
-        <span class="menu-title">Paradox 4.5 Web</span>
+        <span class="menu-title">DOX 1.0 Web</span>
         <div class="menu-group">
             <!-- VIEW je první -->
             <div class="menu-item">
@@ -100,6 +100,11 @@
             <!-- ASK nová položka -->
             <div class="menu-item">
                 <a href="{% url 'ask' %}">ASK</a>
+            </div>
+
+            <!-- IMPORT položka -->
+            <div class="menu-item">
+                <a href="{% url 'import' %}">IMPORT</a>
             </div>
 
             <!-- Create zůstává -->
