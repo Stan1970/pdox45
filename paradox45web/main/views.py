@@ -7,6 +7,8 @@ import json
 import csv
 import io
 from django.http import HttpResponse
+import re
+import pandas as pd
 
 # seznam systémových tabulek, které nechceme zobrazovat v UI
 EXCLUDED_TABLES = {
@@ -208,6 +210,15 @@ def ask(request):
                     answer_columns = selected
         # Export CSV/JSON pokud byl požadavek
         if 'export_csv' in request.POST or 'export_json' in request.POST:
+            # uživatelský název souboru (bez přípony) pokud zadán
+            raw_name = (request.POST.get('save_name', '') or '').strip()
+            if raw_name:
+                # nahradit nepovolené znaky podtržítkem
+                safe_base = re.sub(r'[^A-Za-z0-9_-]+', '_', raw_name).strip('_')
+                if not safe_base:
+                    safe_base = f'answer_{table_name or "result"}'
+            else:
+                safe_base = f'answer_{table_name or "result"}'
             if 'export_csv' in request.POST:
                 output = io.StringIO()
                 writer = csv.writer(output)
@@ -216,7 +227,7 @@ def ask(request):
                 for r in (answer_rows or []):
                     writer.writerow(r)
                 resp = HttpResponse(output.getvalue(), content_type='text/csv')
-                fname = f'answer_{table_name or "result"}.csv'
+                fname = f'{safe_base}.csv'
                 resp['Content-Disposition'] = f'attachment; filename="{fname}"'
                 conn.close()
                 return resp
@@ -229,7 +240,7 @@ def ask(request):
                     rows_json.append(obj)
                 data = json.dumps({'columns': answer_columns or [], 'rows': rows_json}, ensure_ascii=False, indent=2)
                 resp = HttpResponse(data, content_type='application/json; charset=utf-8')
-                fname = f'answer_{table_name or "result"}.json'
+                fname = f'{safe_base}.json'
                 resp['Content-Disposition'] = f'attachment; filename="{fname}"'
                 conn.close()
                 return resp
@@ -352,7 +363,7 @@ def edit_table(request, table_name):
                     new_vals.append(conv)
                     new_cols.append(col)
                 placeholders = ','.join(['?'] * len(new_cols))
-                quoted_cols = ','.join([f'"{c}"' for c in new_cols])
+                quoted_cols = ', '.join([f'"{n}"' for n in new_cols])
                 insert_sql = f'INSERT INTO "{table_name}" ({quoted_cols}) VALUES ({placeholders})'
                 cursor.execute(insert_sql, new_vals)
                 conn.commit()
@@ -504,9 +515,227 @@ def imports_view(request):
     os.makedirs(imports_dir, exist_ok=True)
     msg = ''
 
+    web_url = ''
+    web_tables = []  # list dicts: {preview: html, suggest: name}
+
     if request.method == 'POST':
+        # Import z webu - načtení seznamu tabulek
+        if request.POST.get('fetch_web'):
+            web_url = (request.POST.get('web_url') or '').strip()
+            if not web_url:
+                msg = 'Zadejte URL.'
+            else:
+                try:
+                    try:
+                        import requests
+                        from bs4 import BeautifulSoup
+                        from urllib.parse import urljoin
+                    except ImportError as ie:
+                        msg = f'Chybějící knihovna: {ie}. Nainstalujte prosím balíčky: pip install beautifulsoup4 lxml requests html5lib'
+                        web_tables = []
+                        raise RuntimeError('Missing bs4')
+                    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36'}
+                    resp = requests.get(web_url, headers=headers, timeout=20)
+                    resp.raise_for_status()
+                    html = resp.text
+                    # Pokus o pandas.read_html (rychlé)
+                    dfs = []
+                    try:
+                        dfs = pd.read_html(html)
+                    except Exception:
+                        dfs = []
+                    def parse_tables_from_html(source_html, base_url=None):
+                        out = []
+                        soup = BeautifulSoup(source_html, 'lxml')
+                        raw_tables = soup.find_all('table')
+                        for t in raw_tables:
+                            # hlavička
+                            headers_row = []
+                            thead = t.find('thead')
+                            if thead:
+                                ths = thead.find_all('th')
+                                if ths:
+                                    headers_row = [th.get_text(strip=True) for th in ths]
+                            if not headers_row:
+                                first_tr = t.find('tr')
+                                if first_tr:
+                                    headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
+                            # řádky
+                            data_rows = []
+                            tbody = t.find('tbody')
+                            rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
+                            # pokud jsme použili první <tr> na hlavičku, přeskoč ho u dat
+                            skip_first = bool(headers_row) and (not thead)
+                            for idx_r, tr in enumerate(rows_iter):
+                                if skip_first and idx_r == 0:
+                                    continue
+                                cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
+                                if cells:
+                                    data_rows.append(cells)
+                            # vytvoření DF i bez hlavičky
+                            if data_rows or headers_row:
+                                max_len = 0
+                                for r in data_rows:
+                                    if len(r) > max_len:
+                                        max_len = len(r)
+                                if headers_row:
+                                    max_len = max(max_len, len(headers_row))
+                                if max_len == 0:
+                                    continue
+                                if not headers_row:
+                                    headers_norm = [f'col_{i}' for i in range(max_len)]
+                                else:
+                                    headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
+                                normalized = []
+                                for r in data_rows:
+                                    if len(r) < max_len:
+                                        r = r + [''] * (max_len - len(r))
+                                    normalized.append(r)
+                                import pandas as _pd
+                                df_manual = _pd.DataFrame(normalized, columns=headers_norm)
+                                out.append(df_manual)
+                        # prohledej iframy
+                        if base_url is not None:
+                            for fr in soup.find_all('iframe'):
+                                src = fr.get('src')
+                                if src:
+                                    try:
+                                        url = urljoin(base_url, src)
+                                        ir = requests.get(url, headers=headers, timeout=20)
+                                        ir.raise_for_status()
+                                        out.extend(parse_tables_from_html(ir.text))
+                                    except Exception:
+                                        pass
+                        return out
+                    if not dfs:
+                        dfs = parse_tables_from_html(html, base_url=web_url)
+                    web_tables = []
+                    for i, df in enumerate(dfs):
+                        preview_html = df.head(20).to_html(classes='web-preview', border=1, index=False)
+                        suggest = 'web_table_{}'.format(i)
+                        web_tables.append({'preview': preview_html, 'suggest': suggest})
+                    if not web_tables and 'Missing bs4' not in str(ie if 'ie' in locals() else ''):
+                        msg = f'Na URL {web_url} nebyly nalezeny žádné tabulky.'
+                except RuntimeError:
+                    pass
+                except Exception as e:
+                    msg = f'Chyba při načítání tabulek z URL: {e}'
+        # Import z webu - načtení seznamu tabulek s JS renderováním
+        elif request.POST.get('fetch_web_js'):
+            web_url = (request.POST.get('web_url') or '').strip()
+            if not web_url:
+                msg = 'Zadejte URL.'
+            else:
+                try:
+                    try:
+                        from requests_html import HTMLSession
+                        from bs4 import BeautifulSoup
+                    except ImportError as ie:
+                        msg = f'Chybějící knihovna pro JS render: {ie}. Nainstalujte: pip install requests-html beautifulsoup4 lxml'
+                        web_tables = []
+                        raise RuntimeError('Missing requests-html/bs4')
+                    session = HTMLSession()
+                    r = session.get(web_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    r.html.render(timeout=30, sleep=2)
+                    html = r.html.html
+                    dfs = []
+                    try:
+                        dfs = pd.read_html(html)
+                    except Exception:
+                        dfs = []
+                    soup = BeautifulSoup(html, 'lxml')
+                    iframes = soup.find_all('iframe')
+                    for fr in iframes:
+                        src = fr.get('src')
+                        if src:
+                            try:
+                                ir = session.get(src)
+                                try:
+                                    dfs_iframe = pd.read_html(ir.text)
+                                except Exception:
+                                    dfs_iframe = []
+                                for d in dfs_iframe:
+                                    dfs.append(d)
+                            except Exception:
+                                pass
+                    web_tables = []
+                    for i, df in enumerate(dfs):
+                        preview_html = df.head(20).to_html(classes='web-preview', border=1, index=False)
+                        suggest = 'web_table_{}'.format(i)
+                        web_tables.append({'preview': preview_html, 'suggest': suggest})
+                    if not web_tables and 'Missing requests-html/bs4' not in str(ie if 'ie' in locals() else ''):
+                        msg = f'Na URL {web_url} nebyly nalezeny žádné tabulky (ani po JS renderu).'
+                except RuntimeError:
+                    pass
+                except Exception as e:
+                    msg = f'Chyba při načítání tabulek (JS): {e}'
+        # Import z webu - ulož vybranou tabulku do SQLite
+        elif request.POST.get('import_web'):
+            web_url = (request.POST.get('web_url') or '').strip()
+            idx_raw = request.POST.get('import_web_index')
+            table_name = (request.POST.get('import_web_table') or '').strip()
+            if not web_url:
+                msg = 'URL chybí.'
+            elif idx_raw is None:
+                msg = 'Chybí index tabulky.'
+            elif not table_name:
+                msg = 'Zadejte název cílové tabulky.'
+            else:
+                try:
+                    idx = int(idx_raw)
+                    dfs = pd.read_html(web_url)
+                    if idx < 0 or idx >= len(dfs):
+                        msg = 'Neplatný index tabulky.'
+                    else:
+                        df = dfs[idx]
+                        conn = sqlite3.connect('db.sqlite3')
+                        cur = conn.cursor()
+                        # převeď názvy sloupců na bezpečné
+                        safe_cols = []
+                        for c in df.columns:
+                            cn = re.sub(r'\W+', '_', str(c)).strip('_') or 'col'
+                            safe_cols.append(cn)
+                        # vytvoř tabulku: typy inferuj z pandas dtypes
+                        def map_dtype(s):
+                            t = str(s)
+                            if 'int' in t:
+                                return 'INTEGER'
+                            if 'float' in t or 'double' in t:
+                                return 'REAL'
+                            return 'TEXT'
+                        col_types = [map_dtype(df[c].dtype) for c in df.columns]
+                        cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
+                        cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                        cur.execute(f'CREATE TABLE "{table_name}" ({cols_def})')
+                        placeholders = ','.join(['?'] * len(safe_cols))
+                        quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
+                        insert_sql = f'INSERT INTO "{table_name}" ({quoted_cols}) VALUES ({placeholders})'
+                        # vlož data
+                        for _, row in df.iterrows():
+                            vals = []
+                            for v, t in zip(row.tolist(), col_types):
+                                if pd.isna(v):
+                                    vals.append(None)
+                                elif t == 'INTEGER':
+                                    try:
+                                        vals.append(int(v))
+                                    except Exception:
+                                        vals.append(None)
+                                elif t == 'REAL':
+                                    try:
+                                        vals.append(float(v))
+                                    except Exception:
+                                        vals.append(None)
+                                else:
+                                    vals.append(str(v))
+                            cur.execute(insert_sql, vals)
+                        conn.commit()
+                        conn.close()
+                        msg = f'Tabulka "{table_name}" importována z webu.'
+                except Exception as e:
+                    msg = f'Chyba importu z webu: {e}'
         # upload
-        if 'file' in request.FILES:
+        elif 'file' in request.FILES:
             uploaded = request.FILES['file']
             filename = os.path.basename(uploaded.name)
             dest = os.path.join(imports_dir, filename)
@@ -738,5 +967,4 @@ def imports_view(request):
                 'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
             })
 
-    return render(request, 'import.html', {'imported_files': files, 'msg': msg})
-
+    return render(request, 'import.html', {'imported_files': files, 'msg': msg, 'web_tables': web_tables, 'web_url': web_url})

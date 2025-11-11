@@ -11,6 +11,50 @@
 </form>
 
 <hr>
+<h3>Import z webu</h3>
+<form method="post" style="margin-bottom:10px">
+    {% csrf_token %}
+    <input type="url" name="web_url" placeholder="https://example.com/page-with-tables" value="{{ web_url|default:'' }}" style="width:60%">
+    <button type="submit" name="fetch_web" value="1">Načíst tabulky</button>
+    <button type="submit" name="fetch_web_js" value="1">Načíst (JS)</button>
+</form>
+{% if web_tables %}
+    <p>Nalezeno tabulek: {{ web_tables|length }}</p>
+    <table border="1" cellpadding="6" cellspacing="0" style="width:100%; background:#111; color:#EDEDED;">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Náhled</th>
+                <th>Akce</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for wt in web_tables %}
+            <tr>
+                <td style="white-space:nowrap">{{ forloop.counter0 }}</td>
+                <td>
+                    <div style="max-height:200px; overflow:auto; border:1px solid #444;">
+                        {{ wt.preview|safe }}
+                    </div>
+                </td>
+                <td style="min-width:240px">
+                    <form method="post" style="display:flex; gap:6px; align-items:center;">
+                        {% csrf_token %}
+                        <input type="hidden" name="web_url" value="{{ web_url }}">
+                        <input type="hidden" name="import_web_index" value="{{ forloop.counter0 }}">
+                        <input type="text" name="import_web_table" placeholder="Název cílové tabulky" value="{{ wt.suggest }}">
+                        <button type="submit" name="import_web" value="1">Importovat</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+{% elif web_url %}
+    <p>Nebyly nalezeny žádné tabulky na adrese: {{ web_url }}</p>
+{% endif %}
+
+<hr>
 <h3>Imported files</h3>
 {% if imported_files %}
 <table border="1" cellpadding="6" cellspacing="0">
