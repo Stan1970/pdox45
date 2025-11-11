@@ -225,11 +225,33 @@ def edit_table(request, table_name):
         cols_info = cursor.fetchall()
         # cols_info entries: (cid, name, type, notnull, dflt_value, pk)
         cols = [c[1] for c in cols_info]
-        # prepare metadata list for template (name + type)
-        cols_meta = [{'name': c[1], 'type': (c[2] or '').upper()} for c in cols_info]
+        # prepare metadata list for template (name + type + index)
+        cols_meta = []
+        for idx, c in enumerate(cols_info):
+            cols_meta.append({'idx': idx, 'name': c[1], 'type': (c[2] or '').upper()})
     except Exception as e:
         conn.close()
         return render(request, 'create_table.html', {'msg': f'Error reading table info: {e}'})
+
+    # helper: convert string value to proper python type according to sql type
+    def convert_value(raw, col_type):
+        if raw is None or raw == '':
+            return None, None
+        t = (col_type or '').upper()
+        # integer types
+        if 'INT' in t and not ('CHAR' in t or 'TEXT' in t):
+            try:
+                return int(raw), None
+            except Exception as e:
+                return None, f'Cannot convert "{raw}" to INTEGER for type {col_type}'
+        # real/float/num types
+        if 'REAL' in t or 'FLOA' in t or 'NUM' in t or 'DEC' in t or 'DOUB' in t:
+            try:
+                return float(raw), None
+            except Exception as e:
+                return None, f'Cannot convert "{raw}" to REAL for type {col_type}'
+        # default: text
+        return raw, None
 
     # POST handling: update rows, delete row, add row
     if request.method == 'POST':
@@ -243,15 +265,17 @@ def edit_table(request, table_name):
 
             # Add new row
             elif request.POST.get('add_row'):
-                # collect new values
+                # collect new values by index
                 new_vals = []
                 new_cols = []
-                for col in cols:
-                    val = request.POST.get(f'new_{col}', '').strip()
-                    if val == '':
-                        new_vals.append(None)
-                    else:
-                        new_vals.append(val)
+                errors = []
+                for idx, col in enumerate(cols):
+                    key = f'new_{idx}'
+                    raw = request.POST.get(key, '').strip()
+                    conv, err = convert_value(raw, cols_meta[idx]['type'])
+                    if err:
+                        errors.append(f'Column {col}: {err}')
+                    new_vals.append(conv)
                     new_cols.append(col)
                 placeholders = ','.join(['?'] * len(new_cols))
                 quoted_cols = ','.join([f'"{c}"' for c in new_cols])
@@ -259,31 +283,37 @@ def edit_table(request, table_name):
                 cursor.execute(insert_sql, new_vals)
                 conn.commit()
                 msg = 'New row added.'
+                if errors:
+                    msg += ' Warnings: ' + '; '.join(errors)
 
             # Save edits for all rows
             elif request.POST.get('save'):
                 # get list of rowids currently in DB to iterate
                 cursor.execute(f'SELECT rowid FROM "{table_name}"')
                 rowids = [r[0] for r in cursor.fetchall()]
+                errors = []
                 for rid in rowids:
-                    # build update values
+                    # build update values by index
                     set_parts = []
                     params = []
-                    for col in cols:
-                        key = f'cell_{rid}_{col}'
+                    for idx, col in enumerate(cols):
+                        key = f'cell_{rid}_{idx}'
                         if key in request.POST:
-                            val = request.POST.get(key, '').strip()
-                            if val == '':
-                                params.append(None)
-                            else:
-                                params.append(val)
+                            raw = request.POST.get(key, '').strip()
+                            conv, err = convert_value(raw, cols_meta[idx]['type'])
+                            if err:
+                                errors.append(f'Row {rid} Col {col}: {err}')
                             set_parts.append(f'"{col}" = ?')
+                            params.append(conv)
                     if set_parts:
                         sql = f'UPDATE "{table_name}" SET {", ".join(set_parts)} WHERE rowid = ?'
                         params.append(rid)
                         cursor.execute(sql, params)
                 conn.commit()
-                msg = 'Changes saved.'
+                if errors:
+                    msg = 'Changes saved with warnings: ' + '; '.join(errors)
+                else:
+                    msg = 'Changes saved.'
         except Exception as e:
             conn.rollback()
             msg = f'Error processing POST: {e}'
@@ -307,8 +337,8 @@ def edit_table(request, table_name):
             cells = []
             # include type per cell
             col_types = {c['name']: c['type'] for c in cols_meta}
-            for col in cols:
-                cells.append({'col': col, 'val': values.get(col), 'type': col_types.get(col, '')})
+            for idx, col in enumerate(cols):
+                cells.append({'idx': idx, 'col': col, 'val': values.get(col), 'type': col_types.get(col, '')})
             rows.append({'rowid': rowid, 'cells': cells})
     except Exception as e:
         conn.close()

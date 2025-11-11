@@ -1,99 +1,128 @@
 {% extends 'base.html' %}
 
 {% block content %}
-<h1>Edit table: {{ table_name }}</h1>
-{% if msg %}<p style="color:yellow">{{ msg }}</p>{% endif %}
 
-<p><a href="{% url 'view' %}">Back to tables</a> | <a href="{% url 'view_table' table_name %}">View table</a></p>
+<style>
+/* Fixed wrapper pro celou oblast editace pod horním menu */
+.fixed-edit-wrapper {
+    position: fixed;
+    top: 34px; /* výška menu-bar */
+    left: 0;
+    right: 0;
+    bottom: 0; /* sahá až dolů, aby se vnitřek mohl scrollovat */
+    background: #222;
+    z-index: 60;
+    overflow: auto; /* vnitřní scroll */
+    padding: 12px 12px 20px 12px;
+}
+.fixed-edit-inner {
+    max-width: 900px;
+    margin: 0 auto;
+}
+.header-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 18px; }
+.header-row h1 { margin: 0; }
+.nav-links { margin-top: 4px; font-size: 14px; }
+.add-row-form { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 10px 0; }
+.add-row-form input[type=text],
+.add-row-form input[type=number] { width: 120px; padding: 3px 4px; }
+.add-row-form button, .save-btn { cursor: pointer; }
+.table-scroll { max-height: calc(100vh - 34px - 190px); overflow: auto; border: 1px solid #444; }
+.table-scroll table { width: 100%; border-collapse: collapse; }
+.table-scroll th, .table-scroll td { border: 1px solid #555; padding: 6px; }
+.actions-cell button { background:none; border:1px solid #c00; color:#c00; padding:4px; cursor:pointer; }
+.save-bar { margin-top: 14px; text-align: right; }
+.save-btn { padding:8px 14px; background:#2b5; border:1px solid #2b5; color:#fff; }
+@media (max-height: 600px) { .table-scroll { max-height: calc(100vh - 34px - 220px); } }
+</style>
 
-<!-- Hidden delete form (used by JS) -->
-<form id="deleteForm" method="post" style="display:none">
-    {% csrf_token %}
-    <input type="hidden" name="delete_row" id="delete_row_input" value="">
-</form>
+<div class="fixed-edit-wrapper">
+  <div class="fixed-edit-inner">
+    <div class="header-row">
+      <h1>Edit table: {{ table_name }}</h1>
+      {% if msg %}<p style="color:yellow; margin:0">{{ msg }}</p>{% endif %}
+    </div>
+    <div class="nav-links">
+      <a href="{% url 'view' %}">Back to tables</a> | <a href="{% url 'view_table' table_name %}">View table</a>
+    </div>
 
-<!-- Main form: edit existing rows -->
-<form id="editForm" method="post">
-    {% csrf_token %}
-    <table border="1" cellpadding="6" cellspacing="0">
-        <thead>
+    <!-- Formulář pro přidání nového řádku -->
+    <form method="post" class="add-row-form">
+        {% csrf_token %}
+        {% for cm in cols_meta %}
+            {% if cm.type and 'INT' in cm.type %}
+                <input type="number" name="new_{{ cm.idx }}" placeholder="{{ cm.name }}" step="1">
+            {% elif cm.type and 'REAL' in cm.type %}
+                <input type="number" name="new_{{ cm.idx }}" placeholder="{{ cm.name }}" step="any">
+            {% elif cm.type and 'FLOA' in cm.type %}
+                <input type="number" name="new_{{ cm.idx }}" placeholder="{{ cm.name }}" step="any">
+            {% elif cm.type and 'NUM' in cm.type %}
+                <input type="number" name="new_{{ cm.idx }}" placeholder="{{ cm.name }}" step="any">
+            {% else %}
+                <input type="text" name="new_{{ cm.idx }}" placeholder="{{ cm.name }}">
+            {% endif %}
+        {% endfor %}
+        <button type="submit" name="add_row" value="1">Add row</button>
+    </form>
+
+    <!-- Hidden delete form -->
+    <form id="deleteForm" method="post" style="display:none">
+        {% csrf_token %}
+        <input type="hidden" name="delete_row" id="delete_row_input" value="">
+    </form>
+
+    <!-- Form pro editaci existujících řádků -->
+    <form id="editForm" method="post">
+      {% csrf_token %}
+      <input type="hidden" name="save" value="1">
+      <div class="table-scroll">
+        <table cellpadding="0" cellspacing="0">
+          <thead>
             <tr>
-                <th>#</th>
-                {% for col in cols %}
-                    <th>{{ col }}</th>
-                {% endfor %}
-                <th>Actions</th>
+              <th>#</th>
+              {% for col in cols %}<th>{{ col }}</th>{% endfor %}
+              <th>Actions</th>
             </tr>
-        </thead>
-        <tbody>
+          </thead>
+          <tbody>
             {% for row in rows %}
             <tr>
-                <td>{{ forloop.counter }}</td>
-                {% for cell in row.cells %}
-                <td>
-                    {% if cell.type and 'INT' in cell.type %}
-                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="1">
-                    {% elif cell.type and 'REAL' in cell.type %}
-                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="any">
-                    {% elif cell.type and 'FLOA' in cell.type %}
-                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="any">
-                    {% elif cell.type and 'NUM' in cell.type %}
-                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="any">
-                    {% else %}
-                        <input type="text" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%">
-                    {% endif %}
-                </td>
-                {% endfor %}
-                <td>
-                    <!-- delete single row button: uses hidden form -->
-                    <button type="button" onclick="submitDelete({{ row.rowid }})" style="background:none;border:1px solid #c00;color:#c00;padding:4px;cursor:pointer">Delete</button>
-                </td>
+              <td>{{ forloop.counter }}</td>
+              {% for cell in row.cells %}
+              <td>
+                {% if cell.type and 'INT' in cell.type %}
+                  <input type="number" name="cell_{{ row.rowid }}_{{ cell.idx }}" value="{{ cell.val }}" style="width:100%" step="1">
+                {% elif cell.type and 'REAL' in cell.type %}
+                  <input type="number" name="cell_{{ row.rowid }}_{{ cell.idx }}" value="{{ cell.val }}" style="width:100%" step="any">
+                {% elif cell.type and 'FLOA' in cell.type %}
+                  <input type="number" name="cell_{{ row.rowid }}_{{ cell.idx }}" value="{{ cell.val }}" style="width:100%" step="any">
+                {% elif cell.type and 'NUM' in cell.type %}
+                  <input type="number" name="cell_{{ row.rowid }}_{{ cell.idx }}" value="{{ cell.val }}" style="width:100%" step="any">
+                {% else %}
+                  <input type="text" name="cell_{{ row.rowid }}_{{ cell.idx }}" value="{{ cell.val }}" style="width:100%">
+                {% endif %}
+              </td>
+              {% endfor %}
+              <td class="actions-cell">
+                <button type="button" onclick="submitDelete({{ row.rowid }})">Delete</button>
+              </td>
             </tr>
             {% endfor %}
-        </tbody>
-    </table>
-    <br>
-    <button type="submit" name="save" value="1" style="padding:8px 12px">Save changes</button>
-</form>
-
-<hr>
-<!-- Add new row form -->
-<h3>Add new row</h3>
-<form method="post">
-    {% csrf_token %}
-    <table>
-        <tr>
-            {% for cm in cols_meta %}
-            <td>
-                {% if cm.type and 'INT' in cm.type %}
-                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="1">
-                {% elif cm.type and 'REAL' in cm.type %}
-                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="any">
-                {% elif cm.type and 'FLOA' in cm.type %}
-                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="any">
-                {% elif cm.type and 'NUM' in cm.type %}
-                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="any">
-                {% else %}
-                    <input type="text" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px">
-                {% endif %}
-            </td>
-            {% endfor %}
-        </tr>
-    </table>
-    <br>
-    <button type="submit" name="add_row" value="1" style="padding:6px 10px">Add row</button>
-</form>
+          </tbody>
+        </table>
+      </div>
+      <div class="save-bar">
+        <button type="submit" class="save-btn">Save changes</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <script>
 function submitDelete(rowid) {
-    if (!confirm('Delete row #' + rowid + '? This action cannot be undone.')) {
-        return;
-    }
-    // set hidden input and submit the separate delete form
-    var f = document.getElementById('deleteForm');
-    var inp = document.getElementById('delete_row_input');
-    inp.value = rowid;
-    f.submit();
+  if (!confirm('Delete row #' + rowid + '? This action cannot be undone.')) return;
+  var f = document.getElementById('deleteForm');
+  document.getElementById('delete_row_input').value = rowid;
+  f.submit();
 }
 </script>
 
