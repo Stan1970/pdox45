@@ -6,6 +6,7 @@ import time
 import json
 import csv
 import io
+from django.http import HttpResponse
 
 # seznam systémových tabulek, které nechceme zobrazovat v UI
 EXCLUDED_TABLES = {
@@ -26,7 +27,7 @@ def home(request):
     return render(request, 'home.html')
 
 def ask(request):
-    table_name = request.GET.get('table')
+    table_name = request.GET.get('table') or request.POST.get('table')
     conn = sqlite3.connect('db.sqlite3')
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -111,6 +112,7 @@ def ask(request):
                     answer_columns = selected
             # Uložení do nové tabulky (včetně agregací)
             save_name = request.POST.get('save_name', '').strip()
+            # EXPORT větve se řeší níže společně – zde jen SAVE
             if save_name and answer_columns and answer_rows:
                 # map typů pro původní sloupec
                 type_map = {col[1]: col[2] for col in structure}
@@ -204,6 +206,33 @@ def ask(request):
                     cursor.execute(sql, params)
                     answer_rows = cursor.fetchall()
                     answer_columns = selected
+        # Export CSV/JSON pokud byl požadavek
+        if 'export_csv' in request.POST or 'export_json' in request.POST:
+            if 'export_csv' in request.POST:
+                output = io.StringIO()
+                writer = csv.writer(output)
+                if answer_columns:
+                    writer.writerow(answer_columns)
+                for r in (answer_rows or []):
+                    writer.writerow(r)
+                resp = HttpResponse(output.getvalue(), content_type='text/csv')
+                fname = f'answer_{table_name or "result"}.csv'
+                resp['Content-Disposition'] = f'attachment; filename="{fname}"'
+                conn.close()
+                return resp
+            else:  # export_json
+                rows_json = []
+                for r in (answer_rows or []):
+                    obj = {}
+                    for i, c in enumerate(answer_columns or []):
+                        obj[c] = r[i]
+                    rows_json.append(obj)
+                data = json.dumps({'columns': answer_columns or [], 'rows': rows_json}, ensure_ascii=False, indent=2)
+                resp = HttpResponse(data, content_type='application/json; charset=utf-8')
+                fname = f'answer_{table_name or "result"}.json'
+                resp['Content-Disposition'] = f'attachment; filename="{fname}"'
+                conn.close()
+                return resp
     conn.close()
     return render(request, 'ask.html', {
         'tables': tables,
@@ -710,3 +739,4 @@ def imports_view(request):
             })
 
     return render(request, 'import.html', {'imported_files': files, 'msg': msg})
+

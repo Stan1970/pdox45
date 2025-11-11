@@ -24,8 +24,8 @@
             <input type="checkbox" id="select_all" onclick="toggleAll(this)">
         </th>
         <th>Value</th>
-        <th>Range <BR>Operator</th>
-        <th>Summary <BR> operator</th>
+        <th>Range <br>Operator</th>
+        <th>Summary <br>Operator</th>
     </tr>
     {% for col in structure %}
     <tr>
@@ -82,36 +82,115 @@
 {% endif %}
 
 {% if answer_columns and answer_rows %}
-    <h2>Tabulka ANSWER</h2>
-    <table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
-        <tr>
-            {% for col in answer_columns %}
-                <th>{{ col }}</th>
+    <style>
+        .answer-card { background:#111; border:1px solid #555; border-radius:6px; padding:10px; margin-top:14px; }
+        .answer-card-header { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:8px; }
+        .answer-actions { display:flex; gap:8px; align-items:center; }
+        .answer-actions input[type=text] { padding:4px 6px; }
+        .answer-actions button { padding:6px 10px; cursor:pointer; }
+        .answer-table { width:100%; border-collapse:collapse; }
+        .answer-table th, .answer-table td { border:1px solid #555; padding:4px 6px; }
+        /* Modal pro informaci o uložení */
+        .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; z-index:1000; }
+        .modal { background:#222; color:#EDEDED; border:1px solid #555; border-radius:6px; padding:14px 16px; max-width:520px; width:90%; box-shadow:0 6px 24px rgba(0,0,0,.4); }
+        .modal h3 { margin:0 0 8px 0; }
+        .modal .actions { text-align:right; margin-top:12px; }
+        .modal .actions button { padding:6px 10px; }
+    </style>
+    <div class="answer-card">
+        <div class="answer-card-header">
+            <div><strong>Answer</strong></div>
+            <form method="post" class="answer-actions" id="answerActionsForm">
+                {% csrf_token %}
+                <input type="text" name="save_name" placeholder="Save as..." value="">
+                <button type="submit" name="save_answer" value="1">Save</button>
+                <button type="submit" name="export_csv" value="1" id="btnExportCsv">Export CSV</button>
+                <button type="submit" name="export_json" value="1" id="btnExportJson">Export JSON</button>
+                {% for col in structure %}
+                    {% with cname=col.1 %}
+                        <input type="hidden" name="select_{{ cname }}" value="{{ request.POST|get_select:cname }}">
+                        <input type="hidden" name="value_{{ cname }}" value="{{ request.POST|get_value:cname }}">
+                        <input type="hidden" name="operator_{{ cname }}" value="{{ request.POST|get_op:cname }}">
+                        <input type="hidden" name="summary_operator_{{ cname }}" value="{{ request.POST|get_summary:cname }}">
+                    {% endwith %}
+                {% endfor %}
+                <input type="hidden" name="table" value="{{ table_name }}">
+            </form>
+        </div>
+        <table class="answer-table">
+            <tr>
+                {% for col in answer_columns %}
+                    <th>{{ col }}</th>
+                {% endfor %}
+            </tr>
+            {% for row in answer_rows %}
+            <tr>
+                {% for cell in row %}
+                    <td>{{ cell }}</td>
+                {% endfor %}
+            </tr>
             {% endfor %}
-        </tr>
-        {% for row in answer_rows %}
-        <tr>
-            {% for cell in row %}
-                <td>{{ cell }}</td>
-            {% endfor %}
-        </tr>
-        {% endfor %}
-    </table>
-
-    <form method="post">
-        {% csrf_token %}
-        {% for col in answer_columns %}
-            <input type="hidden" name="select_{{ col }}" value="on">
-            <input type="hidden" name="value_{{ col }}" value="{{ request.POST|get_value:col }}">
-        {% endfor %}
-        <label>Zvol název pro uložení:</label>
-        <input type="text" name="save_name" required>
-        <button type="submit" name="save_answer">Uložit answer</button>
-    </form>
-
-    {% if save_msg %}
-        <p style="color:yellow;">{{ save_msg }}</p>
-    {% endif %}
+        </table>
+    </div>
+    <!-- skrytý iframe pro stahování -->
+    <iframe id="download_iframe" name="download_iframe" style="display:none;"></iframe>
+    <!-- modální dialog -->
+    <div class="modal-backdrop" id="exportModal">
+      <div class="modal">
+        <h3>Export hotov</h3>
+        <div id="exportMsg">Soubor byl uložen do výchozí složky stahování vašeho prohlížeče.</div>
+        <div class="actions"><button type="button" id="exportOk">OK</button></div>
+      </div>
+    </div>
+    <script>
+      (function(){
+        var form = document.getElementById('answerActionsForm');
+        var btnCsv = document.getElementById('btnExportCsv');
+        var btnJson = document.getElementById('btnExportJson');
+        var iframe = document.getElementById('download_iframe');
+        var modal = document.getElementById('exportModal');
+        var exportMsg = document.getElementById('exportMsg');
+        var exportOk = document.getElementById('exportOk');
+        function showModal(message){
+          exportMsg.innerHTML = message;
+          modal.style.display = 'flex';
+        }
+        function hideModal(){ modal.style.display = 'none'; }
+        exportOk.addEventListener('click', hideModal);
+        function getDownloadPathHint(){
+          var ua = navigator.userAgent.toLowerCase();
+          var platform = (navigator.platform || '').toLowerCase();
+          if (platform.indexOf('linux') !== -1) {
+            return '~/Downloads (nebo ~/Stažené)';
+          }
+          if (platform.indexOf('win') !== -1) {
+            return 'C\\\\Users\\<vaše_jméno>\\Downloads';
+          }
+          if (platform.indexOf('mac') !== -1 || ua.indexOf('mac os') !== -1) {
+            return '/Users/<vaše_jméno>/Downloads';
+          }
+          return 'výchozí složky stahování vašeho prohlížeče';
+        }
+        function prepareExport(fmt){
+          // přesměruj submit do skrytého iframe, aby stránka zůstala
+          form.setAttribute('target', 'download_iframe');
+          var tableName = '{{ table_name|default:"result" }}';
+          var filename = 'answer_' + (tableName || 'result') + '.' + fmt;
+          // Po načtení iframe (stažení zahájeno) ukaž dialog
+          var once = function(){
+            var hint = getDownloadPathHint();
+            var tip = 'Tip: Většina prohlížečů zobrazí stažené soubory po stisku kláves Ctrl+J.';
+            showModal('Soubor <b>"' + filename + '"</b> byl uložen do <b>' + hint + '</b>.<br>' + tip);
+            iframe.removeEventListener('load', once);
+            // vrátit target zpět, aby SAVE fungoval normálně
+            form.removeAttribute('target');
+          };
+          iframe.addEventListener('load', once);
+        }
+        if (btnCsv) btnCsv.addEventListener('click', function(){ prepareExport('csv'); });
+        if (btnJson) btnJson.addEventListener('click', function(){ prepareExport('json'); });
+      })();
+    </script>
 {% endif %}
 
 {% endblock %}
