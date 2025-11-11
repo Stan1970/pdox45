@@ -17,9 +17,9 @@
         <tr>
             <td><a href="{% url 'view_table' tbl %}">{{ tbl }}</a></td>
             <td>
-                <a href="{% url 'createtable' %}?edit={{ tbl|urlencode }}" title="Edit {{ tbl }}" style="text-decoration:none;margin-right:8px;font-size:16px">✏️</a>
+                <a href="{% url 'edit_table' tbl %}" title="Edit {{ tbl }}" style="text-decoration:none;margin-right:8px;font-size:16px">✏️</a>
 
-                <form method="post" style="display:inline;margin:0;padding:0" onsubmit="return confirm('Delete table \"{{ tbl|escapejs }}\"? This cannot be undone.');">
+                <form method="post" style="display:inline;margin:0;padding:0">
                     {% csrf_token %}
                     <input type="hidden" name="delete_table" value="{{ tbl }}">
                     <button type="submit" title="Delete {{ tbl }}" style="background:none;border:none;cursor:pointer;color:#c00;font-size:16px">🗑</button>

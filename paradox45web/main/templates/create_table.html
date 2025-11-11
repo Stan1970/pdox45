@@ -13,16 +13,17 @@
             <th>Field Name</th>
             <th>Data Type</th>
         </tr>
-        {% for i in range %}
+        {% comment %} Iterate over prefill_rows (length 10) and use forloop.counter for field indices {% endcomment %}
+        {% for row in prefill_rows %}
         <tr>
-            <td><input type="text" name="field_name_{{i}}" value="{% if prefill_rows and prefill_rows|length >= i %}{% if prefill_rows|length >= i %}{{ prefill_rows[i-1].name }}{% endif %}{% endif %}"></td>
+            <td><input type="text" name="field_name_{{ forloop.counter }}" value="{{ row.name }}"></td>
             <td>
-                <select name="field_type_{{i}}">
+                <select name="field_type_{{ forloop.counter }}">
                     <option value="">---</option>
-                    <option value="INTEGER" {% if prefill_rows and prefill_rows|length >= i and prefill_rows[i-1].type == 'INTEGER' %}selected{% endif %}>INTEGER</option>
-                    <option value="TEXT" {% if prefill_rows and prefill_rows|length >= i and prefill_rows[i-1].type == 'TEXT' %}selected{% endif %}>TEXT</option>
-                    <option value="REAL" {% if prefill_rows and prefill_rows|length >= i and prefill_rows[i-1].type == 'REAL' %}selected{% endif %}>REAL</option>
-                    <option value="BLOB" {% if prefill_rows and prefill_rows|length >= i and prefill_rows[i-1].type == 'BLOB' %}selected{% endif %}>BLOB</option>
+                    <option value="INTEGER" {% if row.type == 'INTEGER' %}selected{% endif %}>INTEGER</option>
+                    <option value="TEXT" {% if row.type == 'TEXT' %}selected{% endif %}>TEXT</option>
+                    <option value="REAL" {% if row.type == 'REAL' %}selected{% endif %}>REAL</option>
+                    <option value="BLOB" {% if row.type == 'BLOB' %}selected{% endif %}>BLOB</option>
                 </select>
             </td>
         </tr>

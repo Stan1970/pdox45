@@ -1,0 +1,100 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>Edit table: {{ table_name }}</h1>
+{% if msg %}<p style="color:yellow">{{ msg }}</p>{% endif %}
+
+<p><a href="{% url 'view' %}">Back to tables</a> | <a href="{% url 'view_table' table_name %}">View table</a></p>
+
+<!-- Hidden delete form (used by JS) -->
+<form id="deleteForm" method="post" style="display:none">
+    {% csrf_token %}
+    <input type="hidden" name="delete_row" id="delete_row_input" value="">
+</form>
+
+<!-- Main form: edit existing rows -->
+<form id="editForm" method="post">
+    {% csrf_token %}
+    <table border="1" cellpadding="6" cellspacing="0">
+        <thead>
+            <tr>
+                <th>#</th>
+                {% for col in cols %}
+                    <th>{{ col }}</th>
+                {% endfor %}
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                {% for cell in row.cells %}
+                <td>
+                    {% if cell.type and 'INT' in cell.type %}
+                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="1">
+                    {% elif cell.type and 'REAL' in cell.type %}
+                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="any">
+                    {% elif cell.type and 'FLOA' in cell.type %}
+                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="any">
+                    {% elif cell.type and 'NUM' in cell.type %}
+                        <input type="number" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%" step="any">
+                    {% else %}
+                        <input type="text" name="cell_{{ row.rowid }}_{{ cell.col }}" value="{{ cell.val }}" style="width:100%">
+                    {% endif %}
+                </td>
+                {% endfor %}
+                <td>
+                    <!-- delete single row button: uses hidden form -->
+                    <button type="button" onclick="submitDelete({{ row.rowid }})" style="background:none;border:1px solid #c00;color:#c00;padding:4px;cursor:pointer">Delete</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <br>
+    <button type="submit" name="save" value="1" style="padding:8px 12px">Save changes</button>
+</form>
+
+<hr>
+<!-- Add new row form -->
+<h3>Add new row</h3>
+<form method="post">
+    {% csrf_token %}
+    <table>
+        <tr>
+            {% for cm in cols_meta %}
+            <td>
+                {% if cm.type and 'INT' in cm.type %}
+                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="1">
+                {% elif cm.type and 'REAL' in cm.type %}
+                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="any">
+                {% elif cm.type and 'FLOA' in cm.type %}
+                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="any">
+                {% elif cm.type and 'NUM' in cm.type %}
+                    <input type="number" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px" step="any">
+                {% else %}
+                    <input type="text" name="new_{{ cm.name }}" placeholder="{{ cm.name }}" style="width:140px">
+                {% endif %}
+            </td>
+            {% endfor %}
+        </tr>
+    </table>
+    <br>
+    <button type="submit" name="add_row" value="1" style="padding:6px 10px">Add row</button>
+</form>
+
+<script>
+function submitDelete(rowid) {
+    if (!confirm('Delete row #' + rowid + '? This action cannot be undone.')) {
+        return;
+    }
+    // set hidden input and submit the separate delete form
+    var f = document.getElementById('deleteForm');
+    var inp = document.getElementById('delete_row_input');
+    inp.value = rowid;
+    f.submit();
+}
+</script>
+
+{% endblock %}

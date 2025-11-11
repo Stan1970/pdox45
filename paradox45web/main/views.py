@@ -193,12 +193,130 @@ def view(request):
                 msg = f'Table "{tbl}" deleted.'
             except Exception as e:
                 msg = f'Error deleting table "{tbl}": {e}'
+
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = [row[0] for row in cursor.fetchall()]
     # odstranit systémové tabulky
     tables = [t for t in tables if t not in EXCLUDED_TABLES]
     conn.close()
     return render(request, 'view.html', {'tables': tables, 'msg': msg})
+
+
+# Nová view pro editaci obsahu tabulky (řádků)
+def edit_table(request, table_name):
+    msg = ''
+    if table_name in EXCLUDED_TABLES:
+        msg = f'Cannot edit system table "{table_name}".'
+        # zobrazíme přehled tabulek s chybou
+        conn = sqlite3.connect('db.sqlite3')
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = [row[0] for row in cursor.fetchall()]
+        tables = [t for t in tables if t not in EXCLUDED_TABLES]
+        conn.close()
+        return render(request, 'view.html', {'tables': tables, 'msg': msg})
+
+    conn = sqlite3.connect('db.sqlite3')
+    cursor = conn.cursor()
+
+    # načítání metadat sloupců
+    try:
+        cursor.execute(f'PRAGMA table_info("{table_name}")')
+        cols_info = cursor.fetchall()
+        # cols_info entries: (cid, name, type, notnull, dflt_value, pk)
+        cols = [c[1] for c in cols_info]
+        # prepare metadata list for template (name + type)
+        cols_meta = [{'name': c[1], 'type': (c[2] or '').upper()} for c in cols_info]
+    except Exception as e:
+        conn.close()
+        return render(request, 'create_table.html', {'msg': f'Error reading table info: {e}'})
+
+    # POST handling: update rows, delete row, add row
+    if request.method == 'POST':
+        try:
+            # Delete single row (by rowid)
+            if request.POST.get('delete_row'):
+                rid = request.POST.get('delete_row')
+                cursor.execute(f'DELETE FROM "{table_name}" WHERE rowid=?', (rid,))
+                conn.commit()
+                msg = f'Row {rid} deleted.'
+
+            # Add new row
+            elif request.POST.get('add_row'):
+                # collect new values
+                new_vals = []
+                new_cols = []
+                for col in cols:
+                    val = request.POST.get(f'new_{col}', '').strip()
+                    if val == '':
+                        new_vals.append(None)
+                    else:
+                        new_vals.append(val)
+                    new_cols.append(col)
+                placeholders = ','.join(['?'] * len(new_cols))
+                quoted_cols = ','.join([f'"{c}"' for c in new_cols])
+                insert_sql = f'INSERT INTO "{table_name}" ({quoted_cols}) VALUES ({placeholders})'
+                cursor.execute(insert_sql, new_vals)
+                conn.commit()
+                msg = 'New row added.'
+
+            # Save edits for all rows
+            elif request.POST.get('save'):
+                # get list of rowids currently in DB to iterate
+                cursor.execute(f'SELECT rowid FROM "{table_name}"')
+                rowids = [r[0] for r in cursor.fetchall()]
+                for rid in rowids:
+                    # build update values
+                    set_parts = []
+                    params = []
+                    for col in cols:
+                        key = f'cell_{rid}_{col}'
+                        if key in request.POST:
+                            val = request.POST.get(key, '').strip()
+                            if val == '':
+                                params.append(None)
+                            else:
+                                params.append(val)
+                            set_parts.append(f'"{col}" = ?')
+                    if set_parts:
+                        sql = f'UPDATE "{table_name}" SET {", ".join(set_parts)} WHERE rowid = ?'
+                        params.append(rid)
+                        cursor.execute(sql, params)
+                conn.commit()
+                msg = 'Changes saved.'
+        except Exception as e:
+            conn.rollback()
+            msg = f'Error processing POST: {e}'
+
+    # načíst data (rowid + values)
+    try:
+        cursor.execute(f'SELECT rowid, * FROM "{table_name}"')
+        rows_raw = cursor.fetchall()
+        # cursor.description aligns with (rowid, col1, col2...)
+        description = [d[0] for d in cursor.description]
+        # drop the first name 'rowid' from description for columns
+        # but keep rowid in rows
+        # build rows as list of dict with rowid and values by column name
+        rows = []
+        for r in rows_raw:
+            rowid = r[0]
+            values = {}
+            for i, col in enumerate(cols, start=1):
+                values[col] = r[i]
+            # create ordered list of cells so template can iterate without dict indexing
+            cells = []
+            # include type per cell
+            col_types = {c['name']: c['type'] for c in cols_meta}
+            for col in cols:
+                cells.append({'col': col, 'val': values.get(col), 'type': col_types.get(col, '')})
+            rows.append({'rowid': rowid, 'cells': cells})
+    except Exception as e:
+        conn.close()
+        return render(request, 'view.html', {'tables': [], 'msg': f'Error reading table data: {e}'})
+
+    conn.close()
+    return render(request, 'edit_table.html', {'table_name': table_name, 'cols': cols, 'cols_meta': cols_meta, 'rows': rows, 'msg': msg})
+
 
 def view_table(request, table_name):
     conn = sqlite3.connect('db.sqlite3')
