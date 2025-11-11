@@ -46,61 +46,13 @@ def ask(request):
             selected = []
             filters = []
             params = []
-            for col in structure:
-                col_name = col[1]
-                if request.POST.get(f'select_{col_name}'):
-                    selected.append(col_name)
-                    value = request.POST.get(f'value_{col_name}', '').strip()
-                    operator = request.POST.get(f'operator_{col_name}', '')
-                    if value != '':
-                        if col[2] in ["INTEGER", "REAL"]:
-                            if operator in ['=', '<', '>']:
-                                filters.append(f'"{col_name}" {operator} ?')
-                                params.append(value)
-                        else:  # TEXT
-                            if operator == 'exact':
-                                filters.append(f'"{col_name}" = ?')
-                                params.append(value)
-                            elif operator == 'startswith':
-                                filters.append(f'"{col_name}" LIKE ?')
-                                params.append(f'{value}%')
-                            elif operator == 'contains':
-                                filters.append(f'"{col_name}" LIKE ?')
-                                params.append(f'%{value}%')
-            if selected:
-                fields = ', '.join([f'"{name}"' for name in selected])
-                sql = f'SELECT {fields} FROM "{table_name}"'
-                if filters:
-                    sql += ' WHERE ' + ' AND '.join(filters)
-                cursor.execute(sql, params)
-                answer_rows = cursor.fetchall()
-                answer_columns = selected
-                # Uložení do nové tabulky
-                save_name = request.POST.get('save_name', '').strip()
-                if save_name and answer_columns and answer_rows:
-                    col_types = {col[1]: col[2] for col in structure if col[1] in answer_columns}
-                    field_defs = ', '.join([f'"{col}" {col_types[col]}' for col in answer_columns])
-                    cursor.execute(f'DROP TABLE IF EXISTS "{save_name}"')
-                    cursor.execute(f'CREATE TABLE "{save_name}" ({field_defs})')
-                    for row in answer_rows:
-                        placeholders = ', '.join(['?' for _ in row])
-                        cursor.execute(f'INSERT INTO "{save_name}" VALUES ({placeholders})', row)
-                    conn.commit()
-                    save_msg = f'Tabulka "{save_name}" byla uložena.'
-        else:
-            # Standardní dotaz + podpora SUM agregace (zatím jen SUM)
-            selected = []  # group-by sloupce
-            filters = []
-            params = []
-            summary_ops = {}  # {col_name: 'SUM'}
-            # projít strukturu: vybrané sloupce, filtry a souhrnné operátory
+            summary_ops = {}
+            # Sběr vstupů
             for col in structure:
                 col_name = col[1]
                 col_type = col[2]
-                # group-by volby
                 if request.POST.get(f'select_{col_name}'):
                     selected.append(col_name)
-                # filtry
                 value = request.POST.get(f'value_{col_name}', '').strip()
                 operator = request.POST.get(f'operator_{col_name}', '')
                 if value != '':
@@ -118,21 +70,27 @@ def ask(request):
                         elif operator == 'contains':
                             filters.append(f'"{col_name}" LIKE ?')
                             params.append(f'%{value}%')
-                # summary operátory (zatím bereme jen SUM)
                 sop = (request.POST.get(f'summary_operator_{col_name}', '') or '').upper()
-                if sop == 'SUM' and col_type in ["INTEGER", "REAL"]:
-                    summary_ops[col_name] = 'SUM'
-            # Pokud je zadán alespoň jeden souhrnný operátor, použije se agregovaný SELECT
+                if sop in ['SUM', 'AVERAGE', 'COUNT', 'MAX', 'MIN']:
+                    # COUNT povolíme pro všechny typy, ostatní pro čísla
+                    if sop == 'COUNT' or col_type in ["INTEGER", "REAL"]:
+                        summary_ops[col_name] = sop
             if summary_ops:
-                # sloupce určené k agregaci nesmí být v group-by, odebereme je z selected
                 group_by_cols = [c for c in selected if c not in summary_ops]
-                agg_exprs = [f'SUM("{c}") AS "SUM_{c}"' for c in summary_ops.keys()]
+                agg_exprs = []
+                for c, op in summary_ops.items():
+                    if op == 'SUM':
+                        agg_exprs.append(f'SUM("{c}") AS "SUM_{c}"')
+                    elif op == 'AVERAGE':
+                        agg_exprs.append(f'AVG("{c}") AS "AVERAGE_{c}"')
+                    elif op == 'COUNT':
+                        agg_exprs.append(f'COUNT("{c}") AS "COUNT_{c}"')
+                    elif op == 'MAX':
+                        agg_exprs.append(f'MAX("{c}") AS "MAX_{c}"')
+                    elif op == 'MIN':
+                        agg_exprs.append(f'MIN("{c}") AS "MIN_{c}"')
                 select_parts = [f'"{c}"' for c in group_by_cols] + agg_exprs
-                if not select_parts:
-                    # fallback: bez výběru ani agregace -> nic neděláme
-                    answer_columns = []
-                    answer_rows = []
-                else:
+                if select_parts:
                     sql = f'SELECT {", ".join(select_parts)} FROM "{table_name}"'
                     if filters:
                         sql += ' WHERE ' + ' AND '.join(filters)
@@ -140,9 +98,104 @@ def ask(request):
                         sql += ' GROUP BY ' + ', '.join([f'"{c}"' for c in group_by_cols])
                     cursor.execute(sql, params)
                     answer_rows = cursor.fetchall()
-                    answer_columns = group_by_cols + [f'SUM_{c}' for c in summary_ops.keys()]
+                    # sestav seznam názvů
+                    answer_columns = group_by_cols + [f'{op}_{c}' for c, op in summary_ops.items()]
             else:
-                # Bez agregací: původní jednoduchý SELECT
+                if selected:
+                    fields = ', '.join([f'"{name}"' for name in selected])
+                    sql = f'SELECT {fields} FROM "{table_name}"'
+                    if filters:
+                        sql += ' WHERE ' + ' AND '.join(filters)
+                    cursor.execute(sql, params)
+                    answer_rows = cursor.fetchall()
+                    answer_columns = selected
+            # Uložení do nové tabulky (včetně agregací)
+            save_name = request.POST.get('save_name', '').strip()
+            if save_name and answer_columns and answer_rows:
+                # map typů pro původní sloupec
+                type_map = {col[1]: col[2] for col in structure}
+                col_defs = []
+                for ac in answer_columns:
+                    if '_' in ac:
+                        prefix, orig = ac.split('_', 1)
+                        # prefix může být SUM/AVERAGE/COUNT/MAX/MIN
+                        if prefix == 'COUNT':
+                            col_defs.append(f'"{ac}" INTEGER')
+                        elif prefix in ['SUM', 'AVERAGE', 'MAX', 'MIN']:
+                            col_defs.append(f'"{ac}" REAL')
+                        else:
+                            # neznámý prefix fallback TEXT
+                            col_defs.append(f'"{ac}" REAL')
+                    else:
+                        # group-by sloupec
+                        sqltype = type_map.get(ac, 'TEXT')
+                        col_defs.append(f'"{ac}" {sqltype}')
+                cursor.execute(f'DROP TABLE IF EXISTS "{save_name}"')
+                col_defs_sql = ', '.join(col_defs)
+                cursor.execute(f'CREATE TABLE "{save_name}" ({col_defs_sql})')
+                placeholders = ', '.join(['?' for _ in answer_columns])
+                ins_sql = f'INSERT INTO "{save_name}" VALUES ({placeholders})'
+                for r in answer_rows:
+                    cursor.execute(ins_sql, r)
+                conn.commit()
+                save_msg = f'Tabulka "{save_name}" byla uložena.'
+        else:
+            # Standardní dotaz + podpora agregací SUM/AVERAGE/COUNT/MAX/MIN
+            selected = []  # group-by sloupec
+            filters = []
+            params = []
+            summary_ops = {}
+            for col in structure:
+                col_name = col[1]
+                col_type = col[2]
+                if request.POST.get(f'select_{col_name}'):
+                    selected.append(col_name)
+                value = request.POST.get(f'value_{col_name}', '').strip()
+                operator = request.POST.get(f'operator_{col_name}', '')
+                if value != '':
+                    if col_type in ["INTEGER", "REAL"]:
+                        if operator in ['=', '<', '>']:
+                            filters.append(f'"{col_name}" {operator} ?')
+                            params.append(value)
+                    else:
+                        if operator == 'exact':
+                            filters.append(f'"{col_name}" = ?')
+                            params.append(value)
+                        elif operator == 'startswith':
+                            filters.append(f'"{col_name}" LIKE ?')
+                            params.append(f'{value}%')
+                        elif operator == 'contains':
+                            filters.append(f'"{col_name}" LIKE ?')
+                            params.append(f'%{value}%')
+                sop = (request.POST.get(f'summary_operator_{col_name}', '') or '').upper()
+                if sop in ['SUM', 'AVERAGE', 'COUNT', 'MAX', 'MIN']:
+                    if sop == 'COUNT' or col_type in ["INTEGER", "REAL"]:
+                        summary_ops[col_name] = sop
+            if summary_ops:
+                group_by_cols = [c for c in selected if c not in summary_ops]
+                agg_exprs = []
+                for c, op in summary_ops.items():
+                    if op == 'SUM':
+                        agg_exprs.append(f'SUM("{c}") AS "SUM_{c}"')
+                    elif op == 'AVERAGE':
+                        agg_exprs.append(f'AVG("{c}") AS "AVERAGE_{c}"')
+                    elif op == 'COUNT':
+                        agg_exprs.append(f'COUNT("{c}") AS "COUNT_{c}"')
+                    elif op == 'MAX':
+                        agg_exprs.append(f'MAX("{c}") AS "MAX_{c}"')
+                    elif op == 'MIN':
+                        agg_exprs.append(f'MIN("{c}") AS "MIN_{c}"')
+                select_parts = [f'"{c}"' for c in group_by_cols] + agg_exprs
+                if select_parts:
+                    sql = f'SELECT {", ".join(select_parts)} FROM "{table_name}"'
+                    if filters:
+                        sql += ' WHERE ' + ' AND '.join(filters)
+                    if group_by_cols:
+                        sql += ' GROUP BY ' + ', '.join([f'"{c}"' for c in group_by_cols])
+                    cursor.execute(sql, params)
+                    answer_rows = cursor.fetchall()
+                    answer_columns = group_by_cols + [f'{op}_{c}' for c, op in summary_ops.items()]
+            else:
                 if selected:
                     fields = ', '.join([f'"{name}"' for name in selected])
                     sql = f'SELECT {fields} FROM "{table_name}"'
