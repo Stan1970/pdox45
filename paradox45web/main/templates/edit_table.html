@@ -3,7 +3,7 @@
 {% block content %}
 
 <style>
-/* Fixed wrapper pro celou oblast editace pod horním menu */
+/* Fixed wrapper pro celou oblast editace pod horním menu (původní jednodušší verze) */
 .fixed-edit-wrapper {
     position: fixed;
     top: 34px; /* výška menu-bar */
@@ -12,7 +12,7 @@
     bottom: 0; /* sahá až dolů, aby se vnitřek mohl scrollovat */
     background: #222;
     z-index: 60;
-    overflow: auto; /* vnitřní scroll */
+    overflow: auto; /* wrapper scrolluje celou oblast */
     padding: 12px 12px 20px 12px;
 }
 .fixed-edit-inner {
@@ -25,21 +25,22 @@
 .add-row-form { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 10px 0; }
 .add-row-form input[type=text],
 .add-row-form input[type=number] { width: 120px; padding: 3px 4px; }
-.add-row-form button, .save-btn { cursor: pointer; }
+.add-row-form button, .save-btn { cursor: pointer; padding:6px 10px; }
 .table-scroll { max-height: calc(100vh - 34px - 190px); overflow: auto; border: 1px solid #444; }
 .table-scroll table { width: 100%; border-collapse: collapse; }
 .table-scroll th, .table-scroll td { border: 1px solid #555; padding: 6px; }
+.table-scroll th { position: sticky; top: 0; background: #111; z-index: 10; }
 .actions-cell button { background:none; border:1px solid #c00; color:#c00; padding:4px; cursor:pointer; }
 .save-bar { margin-top: 14px; text-align: right; }
 .save-btn { padding:8px 14px; background:#2b5; border:1px solid #2b5; color:#fff; }
-@media (max-height: 600px) { .table-scroll { max-height: calc(100vh - 34px - 220px); } }
+.status-msg { color:yellow; margin:0; }
 </style>
 
 <div class="fixed-edit-wrapper">
   <div class="fixed-edit-inner">
     <div class="header-row">
       <h1>Edit table: {{ table_name }}</h1>
-      {% if msg %}<p style="color:yellow; margin:0">{{ msg }}</p>{% endif %}
+      {% if msg %}<p class="status-msg">{{ msg }}</p>{% endif %}
     </div>
     <div class="nav-links">
       <a href="{% url 'view' %}">Back to tables</a> | <a href="{% url 'view_table' table_name %}">View table</a>
@@ -103,7 +104,7 @@
               </td>
               {% endfor %}
               <td class="actions-cell">
-                <button type="button" onclick="submitDelete({{ row.rowid }})">Delete</button>
+                <button type="button" onclick="submitDelete({{ row.rowid }})" title="Delete" aria-label="Delete">&#128465;</button>
               </td>
             </tr>
             {% endfor %}
