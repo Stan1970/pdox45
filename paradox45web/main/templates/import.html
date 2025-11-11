@@ -55,45 +55,65 @@
 {% endif %}
 
 <hr>
-<h3>Imported files</h3>
-{% if imported_files %}
-<table border="1" cellpadding="6" cellspacing="0">
-    <thead>
-        <tr>
-            <th>Name</th>
-            <th>Size (KB)</th>
-            <th>Modified</th>
-            <th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for f in imported_files %}
-        <tr>
-            <td>{{ f.name }}</td>
-            <td style="text-align:right">{{ f.size_kb }}</td>
-            <td>{{ f.mtime }}</td>
-            <td>
-                <!-- Convert form: používá button typu button a JS prompt pro zadání jména tabulky -->
-                <form method="post" style="display:inline">
-                    {% csrf_token %}
-                    <input type="hidden" name="convert_file" value="{{ f.name }}">
-                    <input type="hidden" name="convert_table" value="">
-                    <button type="button" title="Convert (CSV/JSON)" style="background:none;border:none;cursor:pointer;color:#070;font-size:16px;margin-right:6px" onclick="return convertPrompt(this.form, '{{ f.name|escapejs }}');">🔁</button>
-                </form>
+<h3>Import z OTE (API / přímé tabulky)</h3>
+<form method="post" style="margin-bottom:10px">
+    {% csrf_token %}
+    <label>Datum:</label>
+    <input type="date" name="ote_date" value="{{ ote_date|default:'' }}">
+    <label>Time resolution:</label>
+    <select name="ote_time_resolution">
+        <option value="PT15M" {% if ote_time_resolution == 'PT15M' %}selected{% endif %}>PT15M</option>
+        <option value="PT60M" {% if ote_time_resolution == 'PT60M' %}selected{% endif %}>PT60M</option>
+    </select>
+    <button type="submit" name="fetch_ote" value="1">Načíst OTE</button>
+</form>
+{% if ote_tables %}
+    <p>Nalezeno OTE tabulek: {{ ote_tables|length }} (URL: {{ ote_url }})</p>
+    <table border="1" cellpadding="6" cellspacing="0" style="width:100%; background:#111; color:#EDEDED;">
+        <thead><tr><th>#</th><th>Náhled</th><th>Akce</th></tr></thead>
+        <tbody>
+        {% for ot in ote_tables %}
+            <tr>
+                <td>{{ forloop.counter0 }}</td>
+                <td><div style="max-height:200px; overflow:auto; border:1px solid #444;">{{ ot.preview|safe }}</div></td>
+                <td>
+                    <form method="post" style="display:flex; gap:6px; align-items:center;">
+                        {% csrf_token %}
+                        <input type="hidden" name="ote_date" value="{{ ote_date }}">
+                        <input type="hidden" name="ote_time_resolution" value="{{ ote_time_resolution }}">
+                        <input type="hidden" name="import_ote_index" value="{{ forloop.counter0 }}">
+                        <input type="text" name="import_ote_table" placeholder="Název tabulky" value="{{ ot.suggest }}">
+                        <button type="submit" name="import_ote" value="1">Importovat</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+{% elif ote_date %}
+    <p>Žádné OTE tabulky pro datum {{ ote_date }}.</p>
+{% endif %}
 
-                <!-- Delete form: potvrzení přes onclick -->
-                <form method="post" style="display:inline">
-                    {% csrf_token %}
-                    <input type="hidden" name="delete_file" value="{{ f.name }}">
-                    <button type="submit" title="Delete" style="background:none;border:none;cursor:pointer;color:#c00;font-size:16px" onclick="return confirm('Delete file &quot;{{ f.name|escapejs }}&quot;? This action cannot be undone.');">🗑</button>
-                </form>
-            </td>
-        </tr>
-    {% endfor %}
-    </tbody>
+<hr>
+<h3>Log posledních importů</h3>
+{% if import_logs %}
+<table border="1" cellpadding="6" cellspacing="0" style="width:100%; background:#111; color:#EDEDED;">
+  <thead><tr><th>Čas</th><th>Zdroj</th><th>Typ</th><th>Tabulka</th><th>Řádků</th><th>Sloupců</th></tr></thead>
+  <tbody>
+  {% for log in import_logs %}
+    <tr>
+      <td>{{ log.imported_at }}</td>
+      <td style="word-break:break-all">{{ log.source }}</td>
+      <td>{{ log.source_type }}</td>
+      <td>{{ log.table_name }}</td>
+      <td style="text-align:right">{{ log.rows }}</td>
+      <td style="text-align:right">{{ log.cols }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
 </table>
 {% else %}
-<p>No imported files found.</p>
+<p>Žádné záznamy v logu.</p>
 {% endif %}
 
 <script>

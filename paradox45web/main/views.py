@@ -9,6 +9,16 @@ import io
 from django.http import HttpResponse
 import re
 import pandas as pd
+from datetime import datetime
+from urllib.parse import urlencode
+
+# jednoduchá in-memory cache pro načtené stránky/tabulky
+IMPORT_CACHE = {
+    'web': {},   # key: url -> list of DataFrames
+    'ote': {}    # key: (date, res) -> list of DataFrames
+}
+# jednoduchý log do paměti
+IMPORT_LOGS = []  # list of dicts: {imported_at, source, source_type, table_name, rows, cols}
 
 # seznam systémových tabulek, které nechceme zobrazovat v UI
 EXCLUDED_TABLES = {
@@ -24,6 +34,48 @@ EXCLUDED_TABLES = {
     'auth_user',
     'django_session',
 }
+
+def sanitize_table_name(name: str) -> str:
+    safe = re.sub(r'[^A-Za-z0-9_-]+', '_', name).strip('_')
+    if safe and safe[0].isdigit():
+        safe = '_' + safe
+    return safe or 'table'
+
+
+def ensure_unique_table_name(cursor, name: str) -> str:
+    base = name
+    i = 1
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    existing = {r[0] for r in cursor.fetchall()}
+    while name in existing:
+        name = f"{base}_{i}"
+        i += 1
+    return name
+
+
+def normalize_numeric(val: str):
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return val
+    s = str(val).strip()
+    if s == '':
+        return None
+    # nahrad tisícové mezery a tečky/čárky do EN formátu
+    s2 = s.replace('\xa0', ' ').replace(' ', '')
+    # pokud obsahuje čárku a tečku, předpokládej český formát: tisícovky tečka, desetinná čárka
+    if ',' in s2 and '.' in s2:
+        s2 = s2.replace('.', '').replace(',', '.')
+    elif ',' in s2 and '.' not in s2:
+        # pravděpodobně desetinná čárka
+        s2 = s2.replace(',', '.')
+    try:
+        if s2.isdigit() or (s2.startswith('-') and s2[1:].isdigit()):
+            return int(s2)
+        return float(s2)
+    except Exception:
+        return s  # ponech jako text
+
 
 def home(request):
     return render(request, 'home.html')
@@ -517,6 +569,10 @@ def imports_view(request):
 
     web_url = ''
     web_tables = []  # list dicts: {preview: html, suggest: name}
+    ote_date = ''
+    ote_time_resolution = 'PT15M'
+    ote_url = ''
+    ote_tables = []
 
     if request.method == 'POST':
         # Import z webu - načtení seznamu tabulek
@@ -609,6 +665,8 @@ def imports_view(request):
                         return out
                     if not dfs:
                         dfs = parse_tables_from_html(html, base_url=web_url)
+                    # ulož do cache pro import_web
+                    IMPORT_CACHE['web'][web_url] = dfs
                     web_tables = []
                     for i, df in enumerate(dfs):
                         preview_html = df.head(20).to_html(classes='web-preview', border=1, index=False)
@@ -620,6 +678,136 @@ def imports_view(request):
                     pass
                 except Exception as e:
                     msg = f'Chyba při načítání tabulek z URL: {e}'
+        # Import tabulky z webu do SQLite
+        elif request.POST.get('import_web'):
+            web_url = (request.POST.get('web_url') or '').strip()
+            idx_raw = request.POST.get('import_web_index')
+            table_name_req = (request.POST.get('import_web_table') or '').strip()
+            if not web_url or idx_raw is None:
+                msg = 'Chybí URL nebo index tabulky.'
+            else:
+                try:
+                    # zkus cache
+                    dfs = IMPORT_CACHE['web'].get(web_url)
+                    if dfs is None:
+                        import requests
+                        from bs4 import BeautifulSoup
+                        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
+                        resp = requests.get(web_url, headers=headers, timeout=20)
+                        resp.raise_for_status()
+                        html = resp.text
+                        try:
+                            dfs = pd.read_html(html)
+                        except Exception:
+                            dfs = []
+                        if not dfs:
+                            soup = BeautifulSoup(html, 'lxml')
+                            raw_tables = soup.find_all('table')
+                            dfs = []
+                            for t in raw_tables:
+                                headers_row = []
+                                thead = t.find('thead')
+                                if thead:
+                                    ths = thead.find_all('th')
+                                    if ths:
+                                        headers_row = [th.get_text(strip=True) for th in ths]
+                                if not headers_row:
+                                    first_tr = t.find('tr')
+                                    if first_tr:
+                                        headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
+                                data_rows = []
+                                tbody = t.find('tbody')
+                                rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
+                                skip_first = bool(headers_row) and (not thead)
+                                for idx_r, tr in enumerate(rows_iter):
+                                    if skip_first and idx_r == 0:
+                                        continue
+                                    cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
+                                    if cells:
+                                        data_rows.append(cells)
+                                if data_rows or headers_row:
+                                    max_len = 0
+                                    for r in data_rows:
+                                        if len(r) > max_len:
+                                            max_len = len(r)
+                                    if headers_row:
+                                        max_len = max(max_len, len(headers_row))
+                                    if max_len == 0:
+                                        continue
+                                    if not headers_row:
+                                        headers_norm = [f'col_{i}' for i in range(max_len)]
+                                    else:
+                                        headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
+                                    normalized = []
+                                    for r in data_rows:
+                                        if len(r) < max_len:
+                                            r = r + [''] * (max_len - len(r))
+                                        normalized.append(r)
+                                    import pandas as _pd
+                                    df_manual = _pd.DataFrame(normalized, columns=headers_norm)
+                                    dfs.append(df_manual)
+                        IMPORT_CACHE['web'][web_url] = dfs
+                    idx = int(idx_raw)
+                    if idx < 0 or idx >= len(dfs):
+                        msg = 'Neplatný index tabulky.'
+                    else:
+                        df = dfs[idx].applymap(normalize_numeric)
+                        conn = sqlite3.connect('db.sqlite3')
+                        cur = conn.cursor()
+                        # sanitizace názvu + unikátní název
+                        tname = sanitize_table_name(table_name_req or f'web_import_{idx}')
+                        tname = ensure_unique_table_name(cur, tname)
+                        # sloupce a typy
+                        safe_cols = [sanitize_table_name(str(c)) for c in df.columns]
+                        def map_dtype_val(series):
+                            has_float = series.apply(lambda x: isinstance(x, float)).any()
+                            has_num = series.apply(lambda x: isinstance(x, (int, float))).any()
+                            if has_float:
+                                return 'REAL'
+                            if has_num:
+                                return 'INTEGER'
+                            return 'TEXT'
+                        col_types = [map_dtype_val(df[c]) for c in df.columns]
+                        cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
+                        cur.execute(f'DROP TABLE IF EXISTS "{tname}"')
+                        cur.execute(f'CREATE TABLE "{tname}" ({cols_def})')
+                        placeholders = ','.join(['?'] * len(safe_cols))
+                        quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
+                        insert_sql = f'INSERT INTO "{tname}" ({quoted_cols}) VALUES ({placeholders})'
+                        for _, row in df.iterrows():
+                            vals = []
+                            for v, t in zip(row.tolist(), col_types):
+                                if v is None or (isinstance(v, str) and v == ''):
+                                    vals.append(None)
+                                elif t == 'INTEGER':
+                                    try:
+                                        vals.append(int(v))
+                                    except Exception:
+                                        vals.append(None)
+                                elif t == 'REAL':
+                                    try:
+                                        vals.append(float(v))
+                                    except Exception:
+                                        vals.append(None)
+                                else:
+                                    vals.append(str(v))
+                            cur.execute(insert_sql, vals)
+                        conn.commit()
+                        # log
+                        IMPORT_LOGS.insert(0, {
+                            'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'source': web_url,
+                            'source_type': 'WEB',
+                            'table_name': tname,
+                            'rows': int(df.shape[0]),
+                            'cols': int(df.shape[1])
+                        })
+                        if len(IMPORT_LOGS) > 100:
+                            IMPORT_LOGS[:] = IMPORT_LOGS[:100]
+                        conn.close()
+                        msg = f'Tabulka "{tname}" importována z webu.'
+                except Exception as e:
+                    msg = f'Chyba importu z webu: {e}'
         # Import z webu - načtení seznamu tabulek s JS renderováním
         elif request.POST.get('fetch_web_js'):
             web_url = (request.POST.get('web_url') or '').strip()
@@ -669,52 +857,191 @@ def imports_view(request):
                     pass
                 except Exception as e:
                     msg = f'Chyba při načítání tabulek (JS): {e}'
-        # Import z webu - ulož vybranou tabulku do SQLite
-        elif request.POST.get('import_web'):
-            web_url = (request.POST.get('web_url') or '').strip()
-            idx_raw = request.POST.get('import_web_index')
-            table_name = (request.POST.get('import_web_table') or '').strip()
-            if not web_url:
-                msg = 'URL chybí.'
-            elif idx_raw is None:
-                msg = 'Chybí index tabulky.'
-            elif not table_name:
-                msg = 'Zadejte název cílové tabulky.'
+        # Import z OTE - načtení tabulek přes známou stránku s parametry
+        elif request.POST.get('fetch_ote'):
+            ote_date = (request.POST.get('ote_date') or '').strip()
+            ote_time_resolution = (request.POST.get('ote_time_resolution') or 'PT15M').strip() or 'PT15M'
+            if ote_date:
+                params = {'time_resolution': ote_time_resolution, 'date': ote_date}
+                ote_url = f'https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/denni-trh?{urlencode(params)}'
+                # použij existující fetch_web logiku s cache
+                try:
+                    # jednoduchá cache
+                    cache_key = ote_url
+                    if cache_key in IMPORT_CACHE['web']:
+                        dfs = IMPORT_CACHE['web'][cache_key]
+                    else:
+                        import requests
+                        from bs4 import BeautifulSoup
+                        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
+                        resp = requests.get(ote_url, headers=headers, timeout=20)
+                        resp.raise_for_status()
+                        html = resp.text
+                        try:
+                            dfs = pd.read_html(html)
+                        except Exception:
+                            dfs = []
+                        if not dfs:
+                            soup = BeautifulSoup(html, 'lxml')
+                            raw_tables = soup.find_all('table')
+                            dfs = []
+                            for t in raw_tables:
+                                headers_row = []
+                                thead = t.find('thead')
+                                if thead:
+                                    ths = thead.find_all('th')
+                                    if ths:
+                                        headers_row = [th.get_text(strip=True) for th in ths]
+                                if not headers_row:
+                                    first_tr = t.find('tr')
+                                    if first_tr:
+                                        headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
+                                data_rows = []
+                                tbody = t.find('tbody')
+                                rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
+                                skip_first = bool(headers_row) and (not thead)
+                                for idx_r, tr in enumerate(rows_iter):
+                                    if skip_first and idx_r == 0:
+                                        continue
+                                    cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
+                                    if cells:
+                                        data_rows.append(cells)
+                                if data_rows or headers_row:
+                                    max_len = 0
+                                    for r in data_rows:
+                                        if len(r) > max_len:
+                                            max_len = len(r)
+                                    if headers_row:
+                                        max_len = max(max_len, len(headers_row))
+                                    if max_len == 0:
+                                        continue
+                                    if not headers_row:
+                                        headers_norm = [f'col_{i}' for i in range(max_len)]
+                                    else:
+                                        headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
+                                    normalized = []
+                                    for r in data_rows:
+                                        if len(r) < max_len:
+                                            r = r + [''] * (max_len - len(r))
+                                        normalized.append(r)
+                                    import pandas as _pd
+                                    df_manual = _pd.DataFrame(normalized, columns=headers_norm)
+                                    dfs.append(df_manual)
+                        IMPORT_CACHE['web'][cache_key] = dfs
+                    for i, df in enumerate(dfs):
+                        # normalizuj čísla ve všech buňkách
+                        df_norm = df.applymap(normalize_numeric)
+                        preview_html = df_norm.head(20).to_html(classes='web-preview', border=1, index=False)
+                        suggest = f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{i}'
+                        ote_tables.append({'preview': preview_html, 'suggest': suggest})
+                    if not ote_tables:
+                        msg = f'Žádné OTE tabulky pro datum {ote_date} a {ote_time_resolution}.'
+                except Exception as e:
+                    msg = f'Chyba OTE fetch: {e}'
+        # Import OTE tabulky do SQLite
+        elif request.POST.get('import_ote'):
+            ote_date = (request.POST.get('ote_date') or '').strip()
+            ote_time_resolution = (request.POST.get('ote_time_resolution') or 'PT15M').strip() or 'PT15M'
+            idx_raw = request.POST.get('import_ote_index')
+            table_name_req = (request.POST.get('import_ote_table') or '').strip()
+            if not ote_date or idx_raw is None:
+                msg = 'Chybí datum nebo index tabulky.'
             else:
                 try:
+                    params = {'time_resolution': ote_time_resolution, 'date': ote_date}
+                    ote_url = f'https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/denni-trh?{urlencode(params)}'
+                    import requests
+                    from bs4 import BeautifulSoup
+                    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
+                    resp = requests.get(ote_url, headers=headers, timeout=20)
+                    resp.raise_for_status()
+                    html = resp.text
+                    try:
+                        dfs = pd.read_html(html)
+                    except Exception:
+                        dfs = []
+                    if not dfs:
+                        soup = BeautifulSoup(html, 'lxml')
+                        raw_tables = soup.find_all('table')
+                        dfs = []
+                        for t in raw_tables:
+                            headers_row = []
+                            thead = t.find('thead')
+                            if thead:
+                                ths = thead.find_all('th')
+                                if ths:
+                                    headers_row = [th.get_text(strip=True) for th in ths]
+                            if not headers_row:
+                                first_tr = t.find('tr')
+                                if first_tr:
+                                    headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
+                            data_rows = []
+                            tbody = t.find('tbody')
+                            rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
+                            skip_first = bool(headers_row) and (not thead)
+                            for idx_r, tr in enumerate(rows_iter):
+                                if skip_first and idx_r == 0:
+                                    continue
+                                cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
+                                if cells:
+                                    data_rows.append(cells)
+                            if data_rows or headers_row:
+                                max_len = 0
+                                for r in data_rows:
+                                    if len(r) > max_len:
+                                        max_len = len(r)
+                                if headers_row:
+                                    max_len = max(max_len, len(headers_row))
+                                if max_len == 0:
+                                    continue
+                                if not headers_row:
+                                    headers_norm = [f'col_{i}' for i in range(max_len)]
+                                else:
+                                    headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
+                                normalized = []
+                                for r in data_rows:
+                                    if len(r) < max_len:
+                                        r = r + [''] * (max_len - len(r))
+                                    normalized.append(r)
+                                import pandas as _pd
+                                df_manual = _pd.DataFrame(normalized, columns=headers_norm)
+                                dfs.append(df_manual)
                     idx = int(idx_raw)
-                    dfs = pd.read_html(web_url)
                     if idx < 0 or idx >= len(dfs):
                         msg = 'Neplatný index tabulky.'
                     else:
-                        df = dfs[idx]
+                        df = dfs[idx].applymap(normalize_numeric)
                         conn = sqlite3.connect('db.sqlite3')
                         cur = conn.cursor()
-                        # převeď názvy sloupců na bezpečné
+                        # sanitizace a unikátní jméno tabulky
+                        tname = sanitize_table_name(table_name_req or f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{idx}')
+                        tname = ensure_unique_table_name(cur, tname)
+                        # sloupce
                         safe_cols = []
                         for c in df.columns:
-                            cn = re.sub(r'\W+', '_', str(c)).strip('_') or 'col'
+                            cn = sanitize_table_name(str(c))
                             safe_cols.append(cn)
-                        # vytvoř tabulku: typy inferuj z pandas dtypes
-                        def map_dtype(s):
-                            t = str(s)
-                            if 'int' in t:
+                        # typy
+                        def map_dtype_val(series):
+                            nums = series.apply(lambda x: isinstance(x, (int, float)) or (isinstance(x, str) and str(x).replace('.', '', 1).isdigit()))
+                            if nums.any():
+                                # pokud existují floaty, REAL; jinak INTEGER
+                                if series.apply(lambda x: isinstance(x, float)).any():
+                                    return 'REAL'
                                 return 'INTEGER'
-                            if 'float' in t or 'double' in t:
-                                return 'REAL'
                             return 'TEXT'
-                        col_types = [map_dtype(df[c].dtype) for c in df.columns]
+                        col_types = [map_dtype_val(df[c]) for c in df.columns]
                         cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
-                        cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-                        cur.execute(f'CREATE TABLE "{table_name}" ({cols_def})')
+                        cur.execute(f'DROP TABLE IF EXISTS "{tname}"')
+                        cur.execute(f'CREATE TABLE "{tname}" ({cols_def})')
                         placeholders = ','.join(['?'] * len(safe_cols))
                         quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
-                        insert_sql = f'INSERT INTO "{table_name}" ({quoted_cols}) VALUES ({placeholders})'
+                        insert_sql = f'INSERT INTO "{tname}" ({quoted_cols}) VALUES ({placeholders})'
                         # vlož data
                         for _, row in df.iterrows():
                             vals = []
                             for v, t in zip(row.tolist(), col_types):
-                                if pd.isna(v):
+                                if v is None or (isinstance(v, str) and v == ''):
                                     vals.append(None)
                                 elif t == 'INTEGER':
                                     try:
@@ -730,10 +1057,22 @@ def imports_view(request):
                                     vals.append(str(v))
                             cur.execute(insert_sql, vals)
                         conn.commit()
+                        # zapsat do logu
+                        IMPORT_LOGS.insert(0, {
+                            'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'source': ote_url,
+                            'source_type': 'OTE',
+                            'table_name': tname,
+                            'rows': int(df.shape[0]),
+                            'cols': int(df.shape[1])
+                        })
+                        # omez velikost logu
+                        if len(IMPORT_LOGS) > 100:
+                            IMPORT_LOGS[:] = IMPORT_LOGS[:100]
                         conn.close()
-                        msg = f'Tabulka "{table_name}" importována z webu.'
+                        msg = f'Tabulka "{tname}" importována (OTE).'
                 except Exception as e:
-                    msg = f'Chyba importu z webu: {e}'
+                    msg = f'Chyba importu OTE: {e}'
         # upload
         elif 'file' in request.FILES:
             uploaded = request.FILES['file']
@@ -967,4 +1306,4 @@ def imports_view(request):
                 'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
             })
 
-    return render(request, 'import.html', {'imported_files': files, 'msg': msg, 'web_tables': web_tables, 'web_url': web_url})
+    return render(request, 'import.html', {'imported_files': files, 'msg': msg, 'web_tables': web_tables, 'web_url': web_url, 'ote_tables': ote_tables, 'ote_url': ote_url, 'ote_date': ote_date, 'ote_time_resolution': ote_time_resolution, 'import_logs': IMPORT_LOGS})
