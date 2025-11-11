@@ -88,39 +88,69 @@ def ask(request):
                     conn.commit()
                     save_msg = f'Tabulka "{save_name}" byla uložena.'
         else:
-            # Standardní dotaz bez podpory SUM
-            selected = []
+            # Standardní dotaz + podpora SUM agregace (zatím jen SUM)
+            selected = []  # group-by sloupce
             filters = []
             params = []
+            summary_ops = {}  # {col_name: 'SUM'}
+            # projít strukturu: vybrané sloupce, filtry a souhrnné operátory
             for col in structure:
                 col_name = col[1]
+                col_type = col[2]
+                # group-by volby
                 if request.POST.get(f'select_{col_name}'):
                     selected.append(col_name)
-                    value = request.POST.get(f'value_{col_name}', '').strip()
-                    operator = request.POST.get(f'operator_{col_name}', '')
-                    if value != '':
-                        if col[2] in ["INTEGER", "REAL"]:
-                            if operator in ['=', '<', '>']:
-                                filters.append(f'"{col_name}" {operator} ?')
-                                params.append(value)
-                        else:  # TEXT
-                            if operator == 'exact':
-                                filters.append(f'"{col_name}" = ?')
-                                params.append(value)
-                            elif operator == 'startswith':
-                                filters.append(f'"{col_name}" LIKE ?')
-                                params.append(f'{value}%')
-                            elif operator == 'contains':
-                                filters.append(f'"{col_name}" LIKE ?')
-                                params.append(f'%{value}%')
-            if selected:
-                fields = ', '.join([f'"{name}"' for name in selected])
-                sql = f'SELECT {fields} FROM "{table_name}"'
-                if filters:
-                    sql += ' WHERE ' + ' AND '.join(filters)
-                cursor.execute(sql, params)
-                answer_rows = cursor.fetchall()
-                answer_columns = selected
+                # filtry
+                value = request.POST.get(f'value_{col_name}', '').strip()
+                operator = request.POST.get(f'operator_{col_name}', '')
+                if value != '':
+                    if col_type in ["INTEGER", "REAL"]:
+                        if operator in ['=', '<', '>']:
+                            filters.append(f'"{col_name}" {operator} ?')
+                            params.append(value)
+                    else:  # TEXT
+                        if operator == 'exact':
+                            filters.append(f'"{col_name}" = ?')
+                            params.append(value)
+                        elif operator == 'startswith':
+                            filters.append(f'"{col_name}" LIKE ?')
+                            params.append(f'{value}%')
+                        elif operator == 'contains':
+                            filters.append(f'"{col_name}" LIKE ?')
+                            params.append(f'%{value}%')
+                # summary operátory (zatím bereme jen SUM)
+                sop = (request.POST.get(f'summary_operator_{col_name}', '') or '').upper()
+                if sop == 'SUM' and col_type in ["INTEGER", "REAL"]:
+                    summary_ops[col_name] = 'SUM'
+            # Pokud je zadán alespoň jeden souhrnný operátor, použije se agregovaný SELECT
+            if summary_ops:
+                # sloupce určené k agregaci nesmí být v group-by, odebereme je z selected
+                group_by_cols = [c for c in selected if c not in summary_ops]
+                agg_exprs = [f'SUM("{c}") AS "SUM_{c}"' for c in summary_ops.keys()]
+                select_parts = [f'"{c}"' for c in group_by_cols] + agg_exprs
+                if not select_parts:
+                    # fallback: bez výběru ani agregace -> nic neděláme
+                    answer_columns = []
+                    answer_rows = []
+                else:
+                    sql = f'SELECT {", ".join(select_parts)} FROM "{table_name}"'
+                    if filters:
+                        sql += ' WHERE ' + ' AND '.join(filters)
+                    if group_by_cols:
+                        sql += ' GROUP BY ' + ', '.join([f'"{c}"' for c in group_by_cols])
+                    cursor.execute(sql, params)
+                    answer_rows = cursor.fetchall()
+                    answer_columns = group_by_cols + [f'SUM_{c}' for c in summary_ops.keys()]
+            else:
+                # Bez agregací: původní jednoduchý SELECT
+                if selected:
+                    fields = ', '.join([f'"{name}"' for name in selected])
+                    sql = f'SELECT {fields} FROM "{table_name}"'
+                    if filters:
+                        sql += ' WHERE ' + ' AND '.join(filters)
+                    cursor.execute(sql, params)
+                    answer_rows = cursor.fetchall()
+                    answer_columns = selected
     conn.close()
     return render(request, 'ask.html', {
         'tables': tables,
