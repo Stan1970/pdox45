@@ -24,7 +24,8 @@
             <input type="checkbox" id="select_all" onclick="toggleAll(this)">
         </th>
         <th>Value</th>
-        <th>Operator</th>
+        <th>Range <BR>Operator</th>
+        <th>Sumary operator</th>
     </tr>
     {% for col in structure %}
     <tr>
@@ -45,7 +46,6 @@
                     <option value="=">=</option>
                     <option value="<">&lt;</option>
                     <option value=">">&gt;</option>
-                    <option value="sum">sum</option>
                 </select>
             {% else %}
                 <select name="operator_{{ col.1 }}">
@@ -54,6 +54,16 @@
                     <option value="contains">contains</option>
                 </select>
             {% endif %}
+        </td>
+        <td>
+            <select name="summary_operator_{{ col.1 }}">
+                <option value="">--</option>
+                <option value="SUM">SUM</option>
+                <option value="AVERAGE">AVERAGE</option>
+                <option value="COUNT">COUNT</option>
+                <option value="MAX">MAX</option>
+                <option value="MIN">MIN</option>
+            </select>
         </td>
     </tr>
     {% endfor %}

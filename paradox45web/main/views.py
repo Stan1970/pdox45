@@ -88,77 +88,39 @@ def ask(request):
                     conn.commit()
                     save_msg = f'Tabulka "{save_name}" byla uložena.'
         else:
-            # Standardní dotaz s operátory včetně SUM
+            # Standardní dotaz bez podpory SUM
             selected = []
             filters = []
             params = []
-            sum_column = None
             for col in structure:
                 col_name = col[1]
                 if request.POST.get(f'select_{col_name}'):
+                    selected.append(col_name)
+                    value = request.POST.get(f'value_{col_name}', '').strip()
                     operator = request.POST.get(f'operator_{col_name}', '')
-                    if operator == 'sum' and col[2] in ["INTEGER", "REAL"]:
-                        sum_column = col_name
-                    else:
-                        selected.append(col_name)
-            if sum_column:
-                sql = f'SELECT SUM("{sum_column}") FROM "{table_name}"'
-                # Filtry pro ostatní sloupce
-                for col in structure:
-                    col_name = col[1]
-                    if request.POST.get(f'select_{col_name}') and col_name != sum_column:
-                        value = request.POST.get(f'value_{col_name}', '').strip()
-                        operator = request.POST.get(f'operator_{col_name}', '')
-                        if value != '':
-                            if col[2] in ["INTEGER", "REAL"]:
-                                if operator in ['=', '<', '>']:
-                                    filters.append(f'"{col_name}" {operator} ?')
-                                    params.append(value)
-                            else:
-                                if operator == 'exact':
-                                    filters.append(f'"{col_name}" = ?')
-                                    params.append(value)
-                                elif operator == 'startswith':
-                                    filters.append(f'"{col_name}" LIKE ?')
-                                    params.append(f'{value}%')
-                                elif operator == 'contains':
-                                    filters.append(f'"{col_name}" LIKE ?')
-                                    params.append(f'%{value}%')
+                    if value != '':
+                        if col[2] in ["INTEGER", "REAL"]:
+                            if operator in ['=', '<', '>']:
+                                filters.append(f'"{col_name}" {operator} ?')
+                                params.append(value)
+                        else:  # TEXT
+                            if operator == 'exact':
+                                filters.append(f'"{col_name}" = ?')
+                                params.append(value)
+                            elif operator == 'startswith':
+                                filters.append(f'"{col_name}" LIKE ?')
+                                params.append(f'{value}%')
+                            elif operator == 'contains':
+                                filters.append(f'"{col_name}" LIKE ?')
+                                params.append(f'%{value}%')
+            if selected:
+                fields = ', '.join([f'"{name}"' for name in selected])
+                sql = f'SELECT {fields} FROM "{table_name}"'
                 if filters:
                     sql += ' WHERE ' + ' AND '.join(filters)
                 cursor.execute(sql, params)
                 answer_rows = cursor.fetchall()
-                answer_columns = [f'SUM({sum_column})']
-            else:
-                # Běžné operátory
-                for col in structure:
-                    col_name = col[1]
-                    if request.POST.get(f'select_{col_name}'):
-                        value = request.POST.get(f'value_{col_name}', '').strip()
-                        operator = request.POST.get(f'operator_{col_name}', '')
-                        if value != '':
-                            if col[2] in ["INTEGER", "REAL"]:
-                                if operator in ['=', '<', '>']:
-                                    filters.append(f'"{col_name}" {operator} ?')
-                                    params.append(value)
-                            else:  # TEXT
-                                if operator == 'exact':
-                                    filters.append(f'"{col_name}" = ?')
-                                    params.append(value)
-                                elif operator == 'startswith':
-                                    filters.append(f'"{col_name}" LIKE ?')
-                                    params.append(f'{value}%')
-                                elif operator == 'contains':
-                                    filters.append(f'"{col_name}" LIKE ?')
-                                    params.append(f'%{value}%')
-                if selected:
-                    fields = ', '.join([f'"{name}"' for name in selected])
-                    sql = f'SELECT {fields} FROM "{table_name}"'
-                    if filters:
-                        sql += ' WHERE ' + ' AND '.join(filters)
-                    cursor.execute(sql, params)
-                    answer_rows = cursor.fetchall()
-                    answer_columns = selected
+                answer_columns = selected
     conn.close()
     return render(request, 'ask.html', {
         'tables': tables,
