@@ -7,6 +7,21 @@ import json
 import csv
 import io
 
+# seznam systémových tabulek, které nechceme zobrazovat v UI
+EXCLUDED_TABLES = {
+    'django_migrations',
+    'sqlite_sequence',
+    'auth_group_permissions',
+    'auth_user_groups',
+    'auth_user_user_permissions',
+    'django_admin_log',
+    'django_content_type',
+    'auth_permission',
+    'auth_group',
+    'auth_user',
+    'django_session',
+}
+
 def home(request):
     return render(request, 'home.html')
 
@@ -16,6 +31,8 @@ def ask(request):
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = [row[0] for row in cursor.fetchall()]
+    # odstranit systémové tabulky
+    tables = [t for t in tables if t not in EXCLUDED_TABLES]
     structure = None
     answer_columns = []
     answer_rows = []
@@ -154,12 +171,34 @@ def ask(request):
 
 
 def view(request):
+    msg = ''
     conn = sqlite3.connect('db.sqlite3')
     cursor = conn.cursor()
+    # Dvoufázové mazání: nejdříve POST s delete_table zobrazí potvrzovací stránku,
+    # po potvrzení (field 'confirm' == 'yes') dojde ke smazání.
+    if request.method == 'POST' and request.POST.get('delete_table'):
+        tbl = request.POST.get('delete_table')
+        # pokud není potvrzení, vykreslíme potvrzovací stránku
+        if request.POST.get('confirm') != 'yes':
+            # render confirmation template
+            conn.close()
+            return render(request, 'confirm_delete.html', {'table_name': tbl})
+        # pokud potvrzeno, provedeme smazání
+        if tbl in EXCLUDED_TABLES:
+            msg = f'Cannot delete system table "{tbl}".'
+        else:
+            try:
+                cursor.execute(f'DROP TABLE IF EXISTS "{tbl}"')
+                conn.commit()
+                msg = f'Table "{tbl}" deleted.'
+            except Exception as e:
+                msg = f'Error deleting table "{tbl}": {e}'
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = [row[0] for row in cursor.fetchall()]
+    # odstranit systémové tabulky
+    tables = [t for t in tables if t not in EXCLUDED_TABLES]
     conn.close()
-    return render(request, 'view.html', {'tables': tables})
+    return render(request, 'view.html', {'tables': tables, 'msg': msg})
 
 def view_table(request, table_name):
     conn = sqlite3.connect('db.sqlite3')
@@ -178,8 +217,24 @@ def view_table(request, table_name):
 
 def createtable(request):
     msg = ""
+    # Edit mode: GET?edit=<table>
+    edit_name = request.GET.get('edit') if request.method == 'GET' else None
+    prefill = []  # list of (name, type)
+    if edit_name:
+        try:
+            conn = sqlite3.connect('db.sqlite3')
+            cur = conn.cursor()
+            cur.execute(f'PRAGMA table_info("{edit_name}")')
+            info = cur.fetchall()
+            for col in info:
+                # PRAGMA returns (cid, name, type, notnull, dflt_value, pk)
+                prefill.append((col[1], col[2]))
+            conn.close()
+        except Exception as e:
+            msg = f'Error loading table for edit: {e}'
     if request.method == 'POST':
         table_name = request.POST.get('table_name', '').strip()
+        edit_original = request.POST.get('edit_original', '').strip()
         fields = []
         for i in range(1, 11):
             field_name = request.POST.get(f'field_name_{i}', '').strip()
@@ -189,9 +244,12 @@ def createtable(request):
         if table_name and fields:
             conn = sqlite3.connect('db.sqlite3')
             cursor = conn.cursor()
-            field_defs = ', '.join([f'"{name}" {ftype}' for name, ftype in fields])
-            sql = f'CREATE TABLE "{table_name}" ({field_defs});'
             try:
+                # if editing existing table, drop it first (note: data will be lost)
+                if edit_original:
+                    cursor.execute(f'DROP TABLE IF EXISTS "{edit_original}"')
+                field_defs = ', '.join([f'"{name}" {ftype}' for name, ftype in fields])
+                sql = f'CREATE TABLE "{table_name}" ({field_defs});'
                 cursor.execute(sql)
                 conn.commit()
                 msg = f'Table "{table_name}" created!'
@@ -200,7 +258,20 @@ def createtable(request):
             conn.close()
         else:
             msg = 'Fill all required fields.'
-    return render(request, 'create_table.html', {'msg': msg, 'range': range(1, 11)})
+    # prepare context for template: prefill up to provided range
+    # build lists for 1..10 where existing prefill values are used
+    prefill_rows = []
+    for i in range(10):
+        name = ''
+        ptype = ''
+        if i < len(prefill):
+            name, ptype = prefill[i]
+        prefill_rows.append({'name': name, 'type': ptype})
+    context = {'msg': msg, 'range': range(1, 11), 'prefill_rows': prefill_rows}
+    if edit_name:
+        context['edit'] = True
+        context['edit_name'] = edit_name
+    return render(request, 'create_table.html', context)
 
 
 def imports_view(request):

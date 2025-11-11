@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h2>Confirm Delete</h2>
+<p>Are you sure you want to permanently delete table "{{ table_name }}"?</p>
+<form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="delete_table" value="{{ table_name }}">
+    <input type="hidden" name="confirm" value="yes">
+    <button type="submit" style="background:#c00;color:#fff;padding:8px;border:none;cursor:pointer">Yes, delete</button>
+    <a href="{% url 'view' %}" style="margin-left:12px;">Cancel</a>
+</form>
+{% endblock %}
+
