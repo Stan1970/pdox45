@@ -1,5 +1,124 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Welcome to Paradox 4.5 Web</h1>
-<p>This is the home page.</p>
+<p>Primitivní manuál k aplikaci – stručný průvodce.</p>
+
+<h2 id="ucel">K čemu aplikace slouží</h2>
+<ul>
+  <li>Správa tabulek v SQLite (soubor <code>db.sqlite3</code>).</li>
+  <li>Import dat z CSV/JSON souborů a z webových stránek (včetně stránek OTE).</li>
+  <li>Tvorba dotazů nad tabulkami (filtry, výběry, agregace SUM/AVERAGE/COUNT/MAX/MIN) v části <a href="{% url 'ask' %}">ASK</a>.</li>
+  <li>Export výsledků do CSV/JSON.</li>
+  <li>Základní prohlížení a editace dat v tabulkách, tvorba nových tabulek.</li>
+</ul>
+
+<h2 id="spusteni">Jak aplikaci spustit</h2>
+<ol>
+  <li>Nainstalujte závislosti (v adresáři projektu):</li>
+</ol>
+<pre><code>cd paradox45web
+pip install -r requirements.txt
+</code></pre>
+<ol start="2">
+  <li>Spusťte server:</li>
+</ol>
+<pre><code>python manage.py runserver
+</code></pre>
+<p>Otevřete v prohlížeči: <code>http://127.0.0.1:8000/</code></p>
+
+<h2 id="prehled">Přehled menu a hlavních obrazovek</h2>
+<ul>
+  <li><strong>Domů</strong> (tato stránka): základní informace.</li>
+  <li><strong>Seznam tabulek</strong>: přehled tabulek, otevření detailu, smazání (s potvrzením). Odkaz: <a href="{% url 'view' %}">View</a></li>
+  <li><strong>Editace tabulky</strong>: úprava hodnot, přidání/smazání řádku.</li>
+  <li><strong>Tvorba tabulky</strong>: ruční definice nové tabulky (jméno, sloupce a typy). Odkaz: <a href="{% url 'createtable' %}">Create table</a></li>
+  <li><strong>ASK</strong>: stavitel dotazu, filtry a agregace. Odkaz: <a href="{% url 'ask' %}">ASK</a></li>
+  <li><strong>Import</strong>: import ze souboru, webu, OTE + mezikrok “preview”. Odkaz: <a href="{% url 'import' %}">Import</a></li>
+</ul>
+
+<h2 id="ask">ASK: dotazy a agregace</h2>
+<ol>
+  <li>Vyberte tabulku.</li>
+  <li>U sloupců lze zaškrtnout výběr (SELECT), nastavit filtr (čísla: =, &lt;, &gt;; text: exact/startswith/contains) a zvolit <em>Summary operator</em> (SUM/AVERAGE/COUNT/MAX/MIN).</li>
+  <li>Pokud použijete agregace, zbylé vybrané sloupce tvoří GROUP BY.</li>
+  <li>Výsledek můžete uložit jako novou tabulku (zadáním názvu) nebo exportovat do CSV/JSON.</li>
+</ol>
+
+<h2 id="import">Import</h2>
+<h3>1) Soubor (CSV/JSON)</h3>
+<ul>
+  <li>Nahrajte soubor v části <a href="{% url 'import' %}">Import</a>.</li>
+  <li>CSV: čtení v UTF-8, fallback CP1250; prázdné hodnoty → NULL.</li>
+  <li>JSON: podporuje list objektů (se stejnými klíči) i dict-of-lists.</li>
+  <li>Převod vytvoří novou tabulku, typy sloupců se odhadnou automaticky.</li>
+</ul>
+
+<h3>2) Z webu (libovolná URL)</h3>
+<ol>
+  <li>Zadejte URL a klikněte “Načíst tabulky”; pokud se tabulky renderují v JavaScriptu, použijte “Načíst (JS)”.</li>
+  <li>Zobrazí se seznam nalezených tabulek s náhledem.</li>
+  <li>
+    Máte dvě možnosti:
+    <ul>
+      <li><strong>Připravit</strong>: otevře <em>Import preview</em> – můžete přejmenovat sloupce, vynutit typy (INTEGER/REAL/TEXT/DATE/DATETIME) a zvolit formát čísel a datumu; pak “Importovat”.</li>
+      <li><strong>Importovat</strong>: rychlý import bez preview (automatická detekce typů).</li>
+    </ul>
+  </li>
+</ol>
+
+<h3>3) OTE (Denní trh)</h3>
+<ul>
+  <li>Zadejte datum a time resolution (např. PT15M) a klikněte “Načíst OTE”.</li>
+  <li>U vybrané tabulky využijte <strong>Připravit</strong> (preview) nebo <strong>Importovat</strong> (rychlý import).</li>
+</ul>
+
+<h2 id="view-edit">Prohlížení a editace tabulek</h2>
+<ul>
+  <li><strong>Seznam tabulek (View)</strong>: všechny nesystémové tabulky, možnost otevřít, smazat (s potvrzením).</li>
+  <li><strong>Editace</strong>: přidání nového řádku, úprava buněk, smazání řádku (ikona koše). Sloupcová struktura se zde nemění.</li>
+</ul>
+
+<h2 id="create">Tvorba tabulek</h2>
+<ul>
+  <li>V <a href="{% url 'createtable' %}">Create table</a> zadejte název tabulky a definujte sloupce (jméno a SQL typ).</li>
+  <li>Tabulku lze poté plnit ručně nebo importem.</li>
+</ul>
+
+<h2 id="export-log">Export a log</h2>
+<ul>
+  <li>V ASK lze výsledky exportovat do CSV/JSON. Název souboru vychází z pole “save name”.</li>
+  <li>Stránka Import zobrazuje <em>Log posledních importů</em> (in-memory): čas, zdroj, typ, jméno tabulky, řádky/sloupce.</li>
+</ul>
+
+<h2 id="tipy">Tipy a omezení</h2>
+<ul>
+  <li><strong>DATE/DATETIME</strong> se v SQLite ukládají jako ISO TEXT (YYYY-MM-DD resp. YYYY-MM-DD HH:MM:SS).</li>
+  <li>Detekce typů je heuristika; pro přesnost využijte preview a typy vynucujte.</li>
+  <li>Názvy tabulek/sloupců se sanitizují, duplicitám se přidávají suffixy (<code>_1</code>, <code>_2</code>...).</li>
+  <li>Velké tabulky/HTML parsing může trvat déle, u JS stránek použijte “Načíst (JS)”.</li>
+  <li>Cache (načtené tabulky) a import log jsou v paměti – po restartu se vyprázdní.</li>
+</ul>
+
+<h2 id="troubleshoot">Řešení potíží</h2>
+<ul>
+  <li><em>No module named 'bs4'</em>: nainstalujte <code>beautifulsoup4</code> a <code>lxml</code> (jsou v requirements).</li>
+  <li><em>Načíst (JS)</em> nefunguje: doinstalujte <code>requests-html</code>.</li>
+  <li>“Nenalezeny žádné tabulky”, ale ve zdrojáku jsou: zkuste “Načíst (JS)” nebo přímý iframe odkaz.</li>
+  <li>Export nerespektuje jméno: vyplňte “save name” bez přípony; přípona se doplní dle formátu.</li>
+  <li>Po importu tabulka neviditelná: zkontrolujte přidaný suffix unikátního jména, případně otevřete <a href="{% url 'view' %}">Seznam tabulek</a>.</li>
+</ul>
+
+<h2 id="priklady">Příklady workflow</h2>
+<h3>SUM platů podle pozice</h3>
+<ol>
+  <li>ASK → vyberte tabulku (např. <code>main_employee</code>).</li>
+  <li>Zaškrtněte <em>pozice</em> (bude v GROUP BY), u <em>plat</em> nastavte Summary operator = <strong>SUM</strong>.</li>
+  <li>Odešlete; výsledek můžete uložit jako novou tabulku nebo exportovat.</li>
+</ol>
+
+<h3>Import HTML tabulky s preview</h3>
+<ol>
+  <li>Import → zadejte URL → “Načíst tabulky”.</li>
+  <li>Klikněte “Připravit”; přejmenujte sloupce, nastavte typy/formáty → zadejte cílový název → “Importovat”.</li>
+</ol>
 {% endblock %}

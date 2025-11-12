@@ -1,8 +1,8 @@
 from django.shortcuts import render
 import sqlite3
 import os
-from django.conf import settings
 import time
+from django.conf import settings
 import json
 import csv
 import io
@@ -11,6 +11,7 @@ import re
 import pandas as pd
 from datetime import datetime
 from urllib.parse import urlencode
+from dateutil import parser as date_parser
 
 # jednoduchá in-memory cache pro načtené stránky/tabulky
 IMPORT_CACHE = {
@@ -559,53 +560,300 @@ def createtable(request):
     return render(request, 'create_table.html', context)
 
 
+# --- Helpery pro detekci a konverzi typů (použito v mezikroku importu) ---
+from dateutil import parser as date_parser
+
+def detect_column_type(series):
+    non_empty = [v for v in series if v not in [None, '', ' ']]
+    if not non_empty:
+        return 'TEXT'
+    def looks_int(x):
+        try:
+            if isinstance(x, int):
+                return True
+            if isinstance(x, str):
+                s = x.strip()
+                if s.startswith('-'):
+                    s = s[1:]
+                if s.isdigit():
+                    int(x.strip())
+                    return True
+            return False
+        except Exception:
+            return False
+    def looks_float(x):
+        try:
+            if isinstance(x, float):
+                return True
+            s = str(x).strip().replace('\xa0',' ')  # NBSP
+            s = s.replace(' ', '')
+            if ',' in s and '.' in s:
+                s = s.replace('.', '').replace(',', '.')
+            elif ',' in s and '.' not in s:
+                s = s.replace(',', '.')
+            float(s)
+            return True
+        except Exception:
+            return False
+    def looks_date(x):
+        s = str(x).strip()
+        for fmt in ['%Y-%m-%d', '%d.%m.%Y']:
+            try:
+                import datetime
+                datetime.datetime.strptime(s, fmt)
+                return True
+            except Exception:
+                pass
+        if any(ch in s for ch in ['-', '.']):
+            try:
+                date_parser.parse(s, fuzzy=True)
+                return True
+            except Exception:
+                return False
+        return False
+    def looks_datetime(x):
+        s = str(x).strip()
+        for fmt in ['%Y-%m-%d %H:%M:%S', '%d.%m.%Y %H:%M:%S']:
+            try:
+                import datetime
+                datetime.datetime.strptime(s, fmt)
+                return True
+            except Exception:
+                pass
+        if any(ch in s for ch in ['-', '.']) and ':' in s:
+            try:
+                date_parser.parse(s, fuzzy=True)
+                return True
+            except Exception:
+                return False
+        return False
+    sample = non_empty[:50]
+    if all(looks_datetime(v) for v in sample):
+        return 'DATETIME'
+    if all(looks_date(v) for v in sample):
+        return 'DATE'
+    if all(looks_int(v) for v in sample):
+        return 'INTEGER'
+    if all(looks_float(v) for v in sample):
+        return 'REAL'
+    return 'TEXT'
+
+def apply_conversion(value, target_type, num_format, date_format):
+    if value in [None, '', ' ']:
+        return None
+    s = str(value).strip()
+    if target_type in ['INTEGER', 'REAL']:
+        if num_format == 'cz':
+            s2 = s.replace('\xa0',' ').replace(' ', '')
+            s2 = s2.replace('.', '')
+            s2 = s2.replace(',', '.')
+        elif num_format == 'us':
+            s2 = s.replace(',', '')
+        else:  # auto
+            s2 = s.replace('\xa0',' ').replace(' ', '')
+            if ',' in s2 and '.' in s2:
+                s2 = s2.replace('.', '').replace(',', '.')
+            elif ',' in s2 and '.' not in s2:
+                s2 = s2.replace(',', '.')
+        try:
+            if target_type == 'INTEGER':
+                return int(float(s2))
+            return float(s2)
+        except Exception:
+            return None
+    if target_type in ['DATE', 'DATETIME']:
+        import datetime
+        try:
+            if date_format == 'iso':
+                dt = datetime.datetime.strptime(s, '%Y-%m-%d')
+                return dt.strftime('%Y-%m-%d')
+            elif date_format == 'iso_dt':
+                dt = datetime.datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            elif date_format == 'cz':
+                dt = datetime.datetime.strptime(s, '%d.%m.%Y')
+                return dt.strftime('%Y-%m-%d')
+            elif date_format == 'cz_dt':
+                dt = datetime.datetime.strptime(s, '%d.%m.%Y %H:%M:%S')
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            else:  # auto
+                dt = date_parser.parse(s, fuzzy=True)
+                if target_type == 'DATE':
+                    return dt.strftime('%Y-%m-%d')
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return None
+    return s  # TEXT fallback
+
+
 def imports_view(request):
-    """Zpracovává stránku importů: výpis souborů v adresáři imports/, upload, delete a konverzi CSV/JSON do sqlite tabulky.
-    Zachovává pouze CSV a JSON (bez Excelu). CSV se pokusí načíst v utf-8, pak v cp1250 jako fallback.
-    """
+    """Kompletní import view s mezikrokem preview."""
     imports_dir = os.path.join(settings.BASE_DIR, 'imports')
     os.makedirs(imports_dir, exist_ok=True)
     msg = ''
-
     web_url = ''
-    web_tables = []  # list dicts: {preview: html, suggest: name}
+    web_tables = []
     ote_date = ''
     ote_time_resolution = 'PT15M'
     ote_url = ''
     ote_tables = []
-
+    # --- PREVIEW akce ---
     if request.method == 'POST':
-        # Import z webu - načtení seznamu tabulek
-        if request.POST.get('fetch_web'):
+        # WEB: příprava preview
+        if request.POST.get('prepare_web'):
+            web_url = (request.POST.get('web_url') or '').strip()
+            idx_raw = request.POST.get('import_web_index')
+            suggest = (request.POST.get('import_web_table') or '').strip()
+            if not web_url or idx_raw is None:
+                msg = 'Chybí URL nebo index.'
+            else:
+                dfs = IMPORT_CACHE['web'].get(web_url)
+                if dfs is None:
+                    msg = 'Nejdříve načti tabulky.'
+                else:
+                    try:
+                        idx = int(idx_raw)
+                        if idx < 0 or idx >= len(dfs):
+                            msg = 'Neplatný index.'
+                        else:
+                            df = dfs[idx]
+                            cols_meta = []
+                            for c in df.columns:
+                                det = detect_column_type(df[c].head(200))
+                                cols_meta.append({'current': str(c), 'new': sanitize_table_name(str(c)), 'detected': det, 'forced': ''})
+                            preview_table = df.head(20).to_html(border=1, index=False)
+                            return render(request, 'import_preview.html', {
+                                'msg': 'Uprav názvy / typy před importem',
+                                'source_kind': 'WEB',
+                                'source_url': web_url,
+                                'source_index': idx,
+                                'suggest_name': sanitize_table_name(suggest or f'web_import_{idx}') ,
+                                'columns': cols_meta,
+                                'preview_table': preview_table
+                            })
+                    except Exception as e:
+                        msg = f'Chyba přípravy: {e}'
+        # OTE: příprava preview
+        elif request.POST.get('prepare_ote'):
+            ote_date = (request.POST.get('ote_date') or '').strip()
+            ote_time_resolution = (request.POST.get('ote_time_resolution') or 'PT15M').strip() or 'PT15M'
+            idx_raw = request.POST.get('import_ote_index')
+            suggest = (request.POST.get('import_ote_table') or '').strip()
+            if not ote_date or idx_raw is None:
+                msg = 'Chybí datum nebo index.'
+            else:
+                params = {'time_resolution': ote_time_resolution, 'date': ote_date}
+                ote_url = f'https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/denni-trh?{urlencode(params)}'
+                dfs = IMPORT_CACHE['web'].get(ote_url)
+                if dfs is None:
+                    msg = 'Nejdříve načti OTE tabulky.'
+                else:
+                    try:
+                        idx = int(idx_raw)
+                        if idx < 0 or idx >= len(dfs):
+                            msg = 'Neplatný index.'
+                        else:
+                            df = dfs[idx]
+                            cols_meta = []
+                            for c in df.columns:
+                                det = detect_column_type(df[c].head(200))
+                                cols_meta.append({'current': str(c), 'new': sanitize_table_name(str(c)), 'detected': det, 'forced': ''})
+                            preview_table = df.head(20).to_html(border=1, index=False)
+                            return render(request, 'import_preview.html', {
+                                'msg': 'Uprav názvy / typy před importem',
+                                'source_kind': 'OTE',
+                                'source_url': ote_url,
+                                'source_index': idx,
+                                'suggest_name': sanitize_table_name(suggest or f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{idx}'),
+                                'columns': cols_meta,
+                                'preview_table': preview_table
+                            })
+                    except Exception as e:
+                        msg = f'Chyba přípravy OTE: {e}'
+        # Potvrzení preview (WEB i OTE)
+        elif request.POST.get('confirm_import'):
+            source_kind = request.POST.get('source_kind')
+            source_url = request.POST.get('source_url')
+            source_index = request.POST.get('source_index')
+            final_name = sanitize_table_name(request.POST.get('final_table_name') or 'import_table')
+            try:
+                dfs = IMPORT_CACHE['web'].get(source_url)
+                if dfs is None:
+                    msg = 'Data nejsou v cache – načti znovu.'
+                else:
+                    idx = int(source_index)
+                    if idx < 0 or idx >= len(dfs):
+                        msg = 'Index mimo rozsah.'
+                    else:
+                        df = dfs[idx]
+                        new_cols = []
+                        target_types = []
+                        numfmts = []
+                        datefmts = []
+                        for i, c in enumerate(df.columns):
+                            new_name = sanitize_table_name(request.POST.get(f'rename_{i}') or str(c))
+                            forced = (request.POST.get(f'force_{i}') or '').upper()
+                            if not forced:
+                                forced = detect_column_type(df[c].head(200))
+                            new_cols.append(new_name)
+                            target_types.append(forced)
+                            numfmts.append(request.POST.get(f'numfmt_{i}') or 'auto')
+                            datefmts.append(request.POST.get(f'datefmt_{i}') or 'auto')
+                        conn = sqlite3.connect('db.sqlite3')
+                        cur = conn.cursor()
+                        final_name = ensure_unique_table_name(cur, final_name)
+                        col_defs = []
+                        for n, t in zip(new_cols, target_types):
+                            sql_t = 'TEXT' if t in ['DATE','DATETIME'] else t
+                            col_defs.append(f'"{n}" {sql_t}')
+                        cur.execute(f'DROP TABLE IF EXISTS "{final_name}"')
+                        cur.execute(f'CREATE TABLE "{final_name}" ({", ".join(col_defs)})')
+                        placeholders = ','.join(['?'] * len(new_cols))
+                        quoted_cols = ', '.join([f'"{n}"' for n in new_cols])
+                        ins_sql = f'INSERT INTO "{final_name}" ({quoted_cols}) VALUES ({placeholders})'
+                        for _, row in df.iterrows():
+                            vals = []
+                            for v, t, nf, dfmt in zip(row.tolist(), target_types, numfmts, datefmts):
+                                vals.append(apply_conversion(v, t, nf, dfmt))
+                            cur.execute(ins_sql, vals)
+                        conn.commit()
+                        IMPORT_LOGS.insert(0, {
+                            'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'source': source_url,
+                            'source_type': source_kind,
+                            'table_name': final_name,
+                            'rows': int(df.shape[0]),
+                            'cols': int(df.shape[1])
+                        })
+                        if len(IMPORT_LOGS) > 100:
+                            IMPORT_LOGS[:] = IMPORT_LOGS[:100]
+                        conn.close()
+                        msg = f'Import dokončen do tabulky "{final_name}".'
+            except Exception as e:
+                msg = f'Chyba dokončení: {e}'
+        # --- Standardní akce (načtení) ---
+        elif request.POST.get('fetch_web'):
             web_url = (request.POST.get('web_url') or '').strip()
             if not web_url:
                 msg = 'Zadejte URL.'
             else:
                 try:
-                    try:
-                        import requests
-                        from bs4 import BeautifulSoup
-                        from urllib.parse import urljoin
-                    except ImportError as ie:
-                        msg = f'Chybějící knihovna: {ie}. Nainstalujte prosím balíčky: pip install beautifulsoup4 lxml requests html5lib'
-                        web_tables = []
-                        raise RuntimeError('Missing bs4')
-                    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36'}
+                    import requests
+                    from bs4 import BeautifulSoup
+                    from urllib.parse import urljoin
+                    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
                     resp = requests.get(web_url, headers=headers, timeout=20)
                     resp.raise_for_status()
                     html = resp.text
-                    # Pokus o pandas.read_html (rychlé)
-                    dfs = []
                     try:
                         dfs = pd.read_html(html)
                     except Exception:
                         dfs = []
-                    def parse_tables_from_html(source_html, base_url=None):
+                    def parse_tables(source_html, base_url=None):
                         out = []
                         soup = BeautifulSoup(source_html, 'lxml')
                         raw_tables = soup.find_all('table')
                         for t in raw_tables:
-                            # hlavička
                             headers_row = []
                             thead = t.find('thead')
                             if thead:
@@ -616,11 +864,9 @@ def imports_view(request):
                                 first_tr = t.find('tr')
                                 if first_tr:
                                     headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
-                            # řádky
                             data_rows = []
                             tbody = t.find('tbody')
                             rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
-                            # pokud jsme použili první <tr> na hlavičku, přeskoč ho u dat
                             skip_first = bool(headers_row) and (not thead)
                             for idx_r, tr in enumerate(rows_iter):
                                 if skip_first and idx_r == 0:
@@ -628,212 +874,62 @@ def imports_view(request):
                                 cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
                                 if cells:
                                     data_rows.append(cells)
-                            # vytvoření DF i bez hlavičky
                             if data_rows or headers_row:
-                                max_len = 0
-                                for r in data_rows:
-                                    if len(r) > max_len:
-                                        max_len = len(r)
-                                if headers_row:
-                                    max_len = max(max_len, len(headers_row))
+                                max_len = max([len(r) for r in data_rows] + [len(headers_row)]) if (data_rows or headers_row) else 0
                                 if max_len == 0:
                                     continue
                                 if not headers_row:
                                     headers_norm = [f'col_{i}' for i in range(max_len)]
                                 else:
                                     headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
-                                normalized = []
+                                norm_rows = []
                                 for r in data_rows:
                                     if len(r) < max_len:
                                         r = r + [''] * (max_len - len(r))
-                                    normalized.append(r)
+                                    norm_rows.append(r)
                                 import pandas as _pd
-                                df_manual = _pd.DataFrame(normalized, columns=headers_norm)
-                                out.append(df_manual)
-                        # prohledej iframy
+                                df_m = _pd.DataFrame(norm_rows, columns=headers_norm)
+                                out.append(df_m)
                         if base_url is not None:
                             for fr in soup.find_all('iframe'):
                                 src = fr.get('src')
                                 if src:
                                     try:
-                                        url = urljoin(base_url, src)
-                                        ir = requests.get(url, headers=headers, timeout=20)
+                                        u = urljoin(base_url, src)
+                                        ir = requests.get(u, headers=headers, timeout=15)
                                         ir.raise_for_status()
-                                        out.extend(parse_tables_from_html(ir.text))
+                                        out.extend(parse_tables(ir.text))
                                     except Exception:
                                         pass
                         return out
                     if not dfs:
-                        dfs = parse_tables_from_html(html, base_url=web_url)
-                    # ulož do cache pro import_web
+                        dfs = parse_tables(html, base_url=web_url)
                     IMPORT_CACHE['web'][web_url] = dfs
-                    web_tables = []
                     for i, df in enumerate(dfs):
                         preview_html = df.head(20).to_html(classes='web-preview', border=1, index=False)
-                        suggest = 'web_table_{}'.format(i)
-                        web_tables.append({'preview': preview_html, 'suggest': suggest})
-                    if not web_tables and 'Missing bs4' not in str(ie if 'ie' in locals() else ''):
+                        web_tables.append({'preview': preview_html, 'suggest': f'web_table_{i}'})
+                    if not web_tables:
                         msg = f'Na URL {web_url} nebyly nalezeny žádné tabulky.'
-                except RuntimeError:
-                    pass
                 except Exception as e:
-                    msg = f'Chyba při načítání tabulek z URL: {e}'
-        # Import tabulky z webu do SQLite
-        elif request.POST.get('import_web'):
-            web_url = (request.POST.get('web_url') or '').strip()
-            idx_raw = request.POST.get('import_web_index')
-            table_name_req = (request.POST.get('import_web_table') or '').strip()
-            if not web_url or idx_raw is None:
-                msg = 'Chybí URL nebo index tabulky.'
-            else:
-                try:
-                    # zkus cache
-                    dfs = IMPORT_CACHE['web'].get(web_url)
-                    if dfs is None:
-                        import requests
-                        from bs4 import BeautifulSoup
-                        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
-                        resp = requests.get(web_url, headers=headers, timeout=20)
-                        resp.raise_for_status()
-                        html = resp.text
-                        try:
-                            dfs = pd.read_html(html)
-                        except Exception:
-                            dfs = []
-                        if not dfs:
-                            soup = BeautifulSoup(html, 'lxml')
-                            raw_tables = soup.find_all('table')
-                            dfs = []
-                            for t in raw_tables:
-                                headers_row = []
-                                thead = t.find('thead')
-                                if thead:
-                                    ths = thead.find_all('th')
-                                    if ths:
-                                        headers_row = [th.get_text(strip=True) for th in ths]
-                                if not headers_row:
-                                    first_tr = t.find('tr')
-                                    if first_tr:
-                                        headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
-                                data_rows = []
-                                tbody = t.find('tbody')
-                                rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
-                                skip_first = bool(headers_row) and (not thead)
-                                for idx_r, tr in enumerate(rows_iter):
-                                    if skip_first and idx_r == 0:
-                                        continue
-                                    cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
-                                    if cells:
-                                        data_rows.append(cells)
-                                if data_rows or headers_row:
-                                    max_len = 0
-                                    for r in data_rows:
-                                        if len(r) > max_len:
-                                            max_len = len(r)
-                                    if headers_row:
-                                        max_len = max(max_len, len(headers_row))
-                                    if max_len == 0:
-                                        continue
-                                    if not headers_row:
-                                        headers_norm = [f'col_{i}' for i in range(max_len)]
-                                    else:
-                                        headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
-                                    normalized = []
-                                    for r in data_rows:
-                                        if len(r) < max_len:
-                                            r = r + [''] * (max_len - len(r))
-                                        normalized.append(r)
-                                    import pandas as _pd
-                                    df_manual = _pd.DataFrame(normalized, columns=headers_norm)
-                                    dfs.append(df_manual)
-                        IMPORT_CACHE['web'][web_url] = dfs
-                    idx = int(idx_raw)
-                    if idx < 0 or idx >= len(dfs):
-                        msg = 'Neplatný index tabulky.'
-                    else:
-                        df = dfs[idx].applymap(normalize_numeric)
-                        conn = sqlite3.connect('db.sqlite3')
-                        cur = conn.cursor()
-                        # sanitizace názvu + unikátní název
-                        tname = sanitize_table_name(table_name_req or f'web_import_{idx}')
-                        tname = ensure_unique_table_name(cur, tname)
-                        # sloupce a typy
-                        safe_cols = [sanitize_table_name(str(c)) for c in df.columns]
-                        def map_dtype_val(series):
-                            has_float = series.apply(lambda x: isinstance(x, float)).any()
-                            has_num = series.apply(lambda x: isinstance(x, (int, float))).any()
-                            if has_float:
-                                return 'REAL'
-                            if has_num:
-                                return 'INTEGER'
-                            return 'TEXT'
-                        col_types = [map_dtype_val(df[c]) for c in df.columns]
-                        cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
-                        cur.execute(f'DROP TABLE IF EXISTS "{tname}"')
-                        cur.execute(f'CREATE TABLE "{tname}" ({cols_def})')
-                        placeholders = ','.join(['?'] * len(safe_cols))
-                        quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
-                        insert_sql = f'INSERT INTO "{tname}" ({quoted_cols}) VALUES ({placeholders})'
-                        for _, row in df.iterrows():
-                            vals = []
-                            for v, t in zip(row.tolist(), col_types):
-                                if v is None or (isinstance(v, str) and v == ''):
-                                    vals.append(None)
-                                elif t == 'INTEGER':
-                                    try:
-                                        vals.append(int(v))
-                                    except Exception:
-                                        vals.append(None)
-                                elif t == 'REAL':
-                                    try:
-                                        vals.append(float(v))
-                                    except Exception:
-                                        vals.append(None)
-                                else:
-                                    vals.append(str(v))
-                            cur.execute(insert_sql, vals)
-                        conn.commit()
-                        # log
-                        IMPORT_LOGS.insert(0, {
-                            'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            'source': web_url,
-                            'source_type': 'WEB',
-                            'table_name': tname,
-                            'rows': int(df.shape[0]),
-                            'cols': int(df.shape[1])
-                        })
-                        if len(IMPORT_LOGS) > 100:
-                            IMPORT_LOGS[:] = IMPORT_LOGS[:100]
-                        conn.close()
-                        msg = f'Tabulka "{tname}" importována z webu.'
-                except Exception as e:
-                    msg = f'Chyba importu z webu: {e}'
-        # Import z webu - načtení seznamu tabulek s JS renderováním
+                    msg = f'Chyba načítání: {e}'
         elif request.POST.get('fetch_web_js'):
             web_url = (request.POST.get('web_url') or '').strip()
             if not web_url:
                 msg = 'Zadejte URL.'
             else:
                 try:
-                    try:
-                        from requests_html import HTMLSession
-                        from bs4 import BeautifulSoup
-                    except ImportError as ie:
-                        msg = f'Chybějící knihovna pro JS render: {ie}. Nainstalujte: pip install requests-html beautifulsoup4 lxml'
-                        web_tables = []
-                        raise RuntimeError('Missing requests-html/bs4')
+                    from requests_html import HTMLSession
+                    from bs4 import BeautifulSoup
                     session = HTMLSession()
                     r = session.get(web_url, headers={'User-Agent': 'Mozilla/5.0'})
                     r.html.render(timeout=30, sleep=2)
                     html = r.html.html
-                    dfs = []
                     try:
                         dfs = pd.read_html(html)
                     except Exception:
                         dfs = []
                     soup = BeautifulSoup(html, 'lxml')
-                    iframes = soup.find_all('iframe')
-                    for fr in iframes:
+                    for fr in soup.find_all('iframe'):
                         src = fr.get('src')
                         if src:
                             try:
@@ -846,110 +942,21 @@ def imports_view(request):
                                     dfs.append(d)
                             except Exception:
                                 pass
-                    web_tables = []
+                    IMPORT_CACHE['web'][web_url] = dfs
                     for i, df in enumerate(dfs):
-                        preview_html = df.head(20).to_html(classes='web-preview', border=1, index=False)
-                        suggest = 'web_table_{}'.format(i)
-                        web_tables.append({'preview': preview_html, 'suggest': suggest})
-                    if not web_tables and 'Missing requests-html/bs4' not in str(ie if 'ie' in locals() else ''):
-                        msg = f'Na URL {web_url} nebyly nalezeny žádné tabulky (ani po JS renderu).'
-                except RuntimeError:
-                    pass
+                        preview_html = df.head(20).to_html(border=1, index=False)
+                        web_tables.append({'preview': preview_html, 'suggest': f'web_table_{i}'})
+                    if not web_tables:
+                        msg = f'Na URL {web_url} nebyly nalezeny žádné tabulky (JS).'
                 except Exception as e:
-                    msg = f'Chyba při načítání tabulek (JS): {e}'
-        # Import z OTE - načtení tabulek přes známou stránku s parametry
+                    msg = f'Chyba JS načtení: {e}'
         elif request.POST.get('fetch_ote'):
             ote_date = (request.POST.get('ote_date') or '').strip()
             ote_time_resolution = (request.POST.get('ote_time_resolution') or 'PT15M').strip() or 'PT15M'
             if ote_date:
                 params = {'time_resolution': ote_time_resolution, 'date': ote_date}
                 ote_url = f'https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/denni-trh?{urlencode(params)}'
-                # použij existující fetch_web logiku s cache
                 try:
-                    # jednoduchá cache
-                    cache_key = ote_url
-                    if cache_key in IMPORT_CACHE['web']:
-                        dfs = IMPORT_CACHE['web'][cache_key]
-                    else:
-                        import requests
-                        from bs4 import BeautifulSoup
-                        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
-                        resp = requests.get(ote_url, headers=headers, timeout=20)
-                        resp.raise_for_status()
-                        html = resp.text
-                        try:
-                            dfs = pd.read_html(html)
-                        except Exception:
-                            dfs = []
-                        if not dfs:
-                            soup = BeautifulSoup(html, 'lxml')
-                            raw_tables = soup.find_all('table')
-                            dfs = []
-                            for t in raw_tables:
-                                headers_row = []
-                                thead = t.find('thead')
-                                if thead:
-                                    ths = thead.find_all('th')
-                                    if ths:
-                                        headers_row = [th.get_text(strip=True) for th in ths]
-                                if not headers_row:
-                                    first_tr = t.find('tr')
-                                    if first_tr:
-                                        headers_row = [cell.get_text(strip=True) for cell in first_tr.find_all(['th','td'])]
-                                data_rows = []
-                                tbody = t.find('tbody')
-                                rows_iter = tbody.find_all('tr') if tbody else t.find_all('tr')
-                                skip_first = bool(headers_row) and (not thead)
-                                for idx_r, tr in enumerate(rows_iter):
-                                    if skip_first and idx_r == 0:
-                                        continue
-                                    cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
-                                    if cells:
-                                        data_rows.append(cells)
-                                if data_rows or headers_row:
-                                    max_len = 0
-                                    for r in data_rows:
-                                        if len(r) > max_len:
-                                            max_len = len(r)
-                                    if headers_row:
-                                        max_len = max(max_len, len(headers_row))
-                                    if max_len == 0:
-                                        continue
-                                    if not headers_row:
-                                        headers_norm = [f'col_{i}' for i in range(max_len)]
-                                    else:
-                                        headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
-                                    normalized = []
-                                    for r in data_rows:
-                                        if len(r) < max_len:
-                                            r = r + [''] * (max_len - len(r))
-                                        normalized.append(r)
-                                    import pandas as _pd
-                                    df_manual = _pd.DataFrame(normalized, columns=headers_norm)
-                                    dfs.append(df_manual)
-                        IMPORT_CACHE['web'][cache_key] = dfs
-                    for i, df in enumerate(dfs):
-                        # normalizuj čísla ve všech buňkách
-                        df_norm = df.applymap(normalize_numeric)
-                        preview_html = df_norm.head(20).to_html(classes='web-preview', border=1, index=False)
-                        suggest = f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{i}'
-                        ote_tables.append({'preview': preview_html, 'suggest': suggest})
-                    if not ote_tables:
-                        msg = f'Žádné OTE tabulky pro datum {ote_date} a {ote_time_resolution}.'
-                except Exception as e:
-                    msg = f'Chyba OTE fetch: {e}'
-        # Import OTE tabulky do SQLite
-        elif request.POST.get('import_ote'):
-            ote_date = (request.POST.get('ote_date') or '').strip()
-            ote_time_resolution = (request.POST.get('ote_time_resolution') or 'PT15M').strip() or 'PT15M'
-            idx_raw = request.POST.get('import_ote_index')
-            table_name_req = (request.POST.get('import_ote_table') or '').strip()
-            if not ote_date or idx_raw is None:
-                msg = 'Chybí datum nebo index tabulky.'
-            else:
-                try:
-                    params = {'time_resolution': ote_time_resolution, 'date': ote_date}
-                    ote_url = f'https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/denni-trh?{urlencode(params)}'
                     import requests
                     from bs4 import BeautifulSoup
                     headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}
@@ -986,94 +993,173 @@ def imports_view(request):
                                 if cells:
                                     data_rows.append(cells)
                             if data_rows or headers_row:
-                                max_len = 0
-                                for r in data_rows:
-                                    if len(r) > max_len:
-                                        max_len = len(r)
-                                if headers_row:
-                                    max_len = max(max_len, len(headers_row))
+                                max_len = max([len(r) for r in data_rows] + [len(headers_row)]) if (data_rows or headers_row) else 0
                                 if max_len == 0:
                                     continue
                                 if not headers_row:
                                     headers_norm = [f'col_{i}' for i in range(max_len)]
                                 else:
                                     headers_norm = headers_row + [f'col_{i}' for i in range(len(headers_row), max_len)]
-                                normalized = []
+                                norm_rows = []
                                 for r in data_rows:
                                     if len(r) < max_len:
                                         r = r + [''] * (max_len - len(r))
-                                    normalized.append(r)
+                                    norm_rows.append(r)
                                 import pandas as _pd
-                                df_manual = _pd.DataFrame(normalized, columns=headers_norm)
-                                dfs.append(df_manual)
-                    idx = int(idx_raw)
-                    if idx < 0 or idx >= len(dfs):
-                        msg = 'Neplatný index tabulky.'
-                    else:
-                        df = dfs[idx].applymap(normalize_numeric)
-                        conn = sqlite3.connect('db.sqlite3')
-                        cur = conn.cursor()
-                        # sanitizace a unikátní jméno tabulky
-                        tname = sanitize_table_name(table_name_req or f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{idx}')
-                        tname = ensure_unique_table_name(cur, tname)
-                        # sloupce
-                        safe_cols = []
-                        for c in df.columns:
-                            cn = sanitize_table_name(str(c))
-                            safe_cols.append(cn)
-                        # typy
-                        def map_dtype_val(series):
-                            nums = series.apply(lambda x: isinstance(x, (int, float)) or (isinstance(x, str) and str(x).replace('.', '', 1).isdigit()))
-                            if nums.any():
-                                # pokud existují floaty, REAL; jinak INTEGER
-                                if series.apply(lambda x: isinstance(x, float)).any():
+                                df_m = _pd.DataFrame(norm_rows, columns=headers_norm)
+                                dfs.append(df_m)
+                    IMPORT_CACHE['web'][ote_url] = dfs
+                    for i, df in enumerate(dfs):
+                        df_norm = df.applymap(normalize_numeric)
+                        ote_tables.append({'preview': df_norm.head(20).to_html(border=1, index=False), 'suggest': f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{i}'})
+                    if not ote_tables:
+                        msg = f'Žádné OTE tabulky pro datum {ote_date}.'
+                except Exception as e:
+                    msg = f'Chyba načítání OTE: {e}'
+        elif request.POST.get('import_web'):
+            # zachováno staré okamžité importování (bez preview) pokud uživatel klikne přímo Importovat
+            web_url = (request.POST.get('web_url') or '').strip()
+            idx_raw = request.POST.get('import_web_index')
+            table_name_req = (request.POST.get('import_web_table') or '').strip()
+            if not web_url or idx_raw is None:
+                msg = 'Chybí URL nebo index.'
+            else:
+                dfs = IMPORT_CACHE['web'].get(web_url)
+                if dfs is None:
+                    msg = 'Nejdříve načti tabulky.'
+                else:
+                    try:
+                        idx = int(idx_raw)
+                        if idx < 0 or idx >= len(dfs):
+                            msg = 'Neplatný index.'
+                        else:
+                            df = dfs[idx].applymap(normalize_numeric)
+                            conn = sqlite3.connect('db.sqlite3')
+                            cur = conn.cursor()
+                            tname = ensure_unique_table_name(cur, sanitize_table_name(table_name_req or f'web_import_{idx}'))
+                            safe_cols = [sanitize_table_name(str(c)) for c in df.columns]
+                            def map_dt(s):
+                                has_float = s.apply(lambda x: isinstance(x, float)).any()
+                                has_num = s.apply(lambda x: isinstance(x, (int, float))).any()
+                                if has_float:
                                     return 'REAL'
-                                return 'INTEGER'
-                            return 'TEXT'
-                        col_types = [map_dtype_val(df[c]) for c in df.columns]
-                        cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
-                        cur.execute(f'DROP TABLE IF EXISTS "{tname}"')
-                        cur.execute(f'CREATE TABLE "{tname}" ({cols_def})')
-                        placeholders = ','.join(['?'] * len(safe_cols))
-                        quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
-                        insert_sql = f'INSERT INTO "{tname}" ({quoted_cols}) VALUES ({placeholders})'
-                        # vlož data
-                        for _, row in df.iterrows():
-                            vals = []
-                            for v, t in zip(row.tolist(), col_types):
-                                if v is None or (isinstance(v, str) and v == ''):
-                                    vals.append(None)
-                                elif t == 'INTEGER':
-                                    try:
-                                        vals.append(int(v))
-                                    except Exception:
+                                if has_num:
+                                    return 'INTEGER'
+                                return 'TEXT'
+                            col_types = [map_dt(df[c]) for c in df.columns]
+                            cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
+                            cur.execute(f'DROP TABLE IF EXISTS "{tname}"')
+                            cur.execute(f'CREATE TABLE "{tname}" ({cols_def})')
+                            placeholders = ','.join(['?'] * len(safe_cols))
+                            quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
+                            ins_sql = f'INSERT INTO "{tname}" ({quoted_cols}) VALUES ({placeholders})'
+                            for _, row in df.iterrows():
+                                vals = []
+                                for v, t in zip(row.tolist(), col_types):
+                                    if v is None or (isinstance(v, str) and v == ''):
                                         vals.append(None)
-                                elif t == 'REAL':
-                                    try:
-                                        vals.append(float(v))
-                                    except Exception:
+                                    elif t == 'INTEGER':
+                                        try:
+                                            vals.append(int(v))
+                                        except Exception:
+                                            vals.append(None)
+                                    elif t == 'REAL':
+                                        try:
+                                            vals.append(float(v))
+                                        except Exception:
+                                            vals.append(None)
+                                    else:
+                                        vals.append(str(v))
+                            cur.execute(ins_sql, vals)
+                            conn.commit()
+                            IMPORT_LOGS.insert(0, {
+                                'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'source': web_url,
+                                'source_type': 'WEB',
+                                'table_name': tname,
+                                'rows': int(df.shape[0]),
+                                'cols': int(df.shape[1])
+                            })
+                            if len(IMPORT_LOGS) > 100:
+                                IMPORT_LOGS[:] = IMPORT_LOGS[:100]
+                            conn.close()
+                            msg = f'Tabulka "{tname}" importována z webu.'
+                    except Exception as e:
+                        msg = f'Chyba importu z webu: {e}'
+        elif request.POST.get('import_ote'):
+            # okamžité import OTE bez preview (původní tlačítko Importovat)
+            ote_date = (request.POST.get('ote_date') or '').strip()
+            ote_time_resolution = (request.POST.get('ote_time_resolution') or 'PT15M').strip() or 'PT15M'
+            idx_raw = request.POST.get('import_ote_index')
+            table_name_req = (request.POST.get('import_ote_table') or '').strip()
+            if not ote_date or idx_raw is None:
+                msg = 'Chybí datum nebo index.'
+            else:
+                try:
+                    params = {'time_resolution': ote_time_resolution, 'date': ote_date}
+                    ote_url = f'https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/denni-trh?{urlencode(params)}'
+                    dfs = IMPORT_CACHE['web'].get(ote_url)
+                    if dfs is None:
+                        msg = 'Nejdříve načti OTE tabulky.'
+                    else:
+                        idx = int(idx_raw)
+                        if idx < 0 or idx >= len(dfs):
+                            msg = 'Neplatný index.'
+                        else:
+                            df = dfs[idx].applymap(normalize_numeric)
+                            conn = sqlite3.connect('db.sqlite3')
+                            cur = conn.cursor()
+                            tname = ensure_unique_table_name(cur, sanitize_table_name(table_name_req or f'ote_{ote_time_resolution.lower()}_{ote_date.replace("-", "")}_{idx}'))
+                            safe_cols = [sanitize_table_name(str(c)) for c in df.columns]
+                            def map_dt(s):
+                                has_float = s.apply(lambda x: isinstance(x, float)).any()
+                                has_num = s.apply(lambda x: isinstance(x, (int, float))).any()
+                                if has_float:
+                                    return 'REAL'
+                                if has_num:
+                                    return 'INTEGER'
+                                return 'TEXT'
+                            col_types = [map_dt(df[c]) for c in df.columns]
+                            cols_def = ', '.join([f'"{n}" {t}' for n, t in zip(safe_cols, col_types)])
+                            cur.execute(f'DROP TABLE IF EXISTS "{tname}"')
+                            cur.execute(f'CREATE TABLE "{tname}" ({cols_def})')
+                            placeholders = ','.join(['?'] * len(safe_cols))
+                            quoted_cols = ', '.join([f'"{n}"' for n in safe_cols])
+                            ins_sql = f'INSERT INTO "{tname}" ({quoted_cols}) VALUES ({placeholders})'
+                            for _, row in df.iterrows():
+                                vals = []
+                                for v, t in zip(row.tolist(), col_types):
+                                    if v is None or (isinstance(v, str) and v == ''):
                                         vals.append(None)
-                                else:
-                                    vals.append(str(v))
-                            cur.execute(insert_sql, vals)
-                        conn.commit()
-                        # zapsat do logu
-                        IMPORT_LOGS.insert(0, {
-                            'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            'source': ote_url,
-                            'source_type': 'OTE',
-                            'table_name': tname,
-                            'rows': int(df.shape[0]),
-                            'cols': int(df.shape[1])
-                        })
-                        # omez velikost logu
-                        if len(IMPORT_LOGS) > 100:
-                            IMPORT_LOGS[:] = IMPORT_LOGS[:100]
-                        conn.close()
-                        msg = f'Tabulka "{tname}" importována (OTE).'
+                                    elif t == 'INTEGER':
+                                        try:
+                                            vals.append(int(v))
+                                        except Exception:
+                                            vals.append(None)
+                                    elif t == 'REAL':
+                                        try:
+                                            vals.append(float(v))
+                                        except Exception:
+                                            vals.append(None)
+                                    else:
+                                        vals.append(str(v))
+                            cur.execute(ins_sql, vals)
+                            conn.commit()
+                            IMPORT_LOGS.insert(0, {
+                                'imported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'source': ote_url,
+                                'source_type': 'OTE',
+                                'table_name': tname,
+                                'rows': int(df.shape[0]),
+                                'cols': int(df.shape[1])
+                            })
+                            if len(IMPORT_LOGS) > 100:
+                                IMPORT_LOGS[:] = IMPORT_LOGS[:100]
+                            conn.close()
+                            msg = f'Tabulka "{tname}" importována (OTE).'
                 except Exception as e:
                     msg = f'Chyba importu OTE: {e}'
-        # upload
+        # Upload souboru
         elif 'file' in request.FILES:
             uploaded = request.FILES['file']
             filename = os.path.basename(uploaded.name)
@@ -1082,62 +1168,56 @@ def imports_view(request):
                 with open(dest, 'wb') as f:
                     for chunk in uploaded.chunks():
                         f.write(chunk)
-                msg = f'File "{filename}" uploaded.'
+                msg = f'Soubor "{filename}" nahrán.'
             except Exception as e:
-                msg = f'Upload error: {e}'
-        # delete
+                msg = f'Chyba uploadu: {e}'
+        # Smazání souboru
         elif request.POST.get('delete_file'):
             name = request.POST.get('delete_file')
             path = os.path.join(imports_dir, name)
             if os.path.exists(path):
                 try:
                     os.remove(path)
-                    msg = f'File "{name}" deleted.'
+                    msg = f'Soubor "{name}" smazán.'
                 except Exception as e:
-                    msg = f'Delete error: {e}'
+                    msg = f'Chyba mazání: {e}'
             else:
-                msg = f'File "{name}" not found.'
-        # convert
+                msg = 'Soubor nenalezen.'
+        # Konverze CSV/JSON do tabulky
         elif request.POST.get('convert_file'):
             name = request.POST.get('convert_file')
-            table_name = request.POST.get('convert_table', '').strip()
-            if not table_name:
-                table_name = os.path.splitext(name)[0]
+            table_name = sanitize_table_name(request.POST.get('convert_table') or os.path.splitext(name)[0])
             path = os.path.join(imports_dir, name)
             if not os.path.exists(path):
-                msg = f'File "{name}" not found.'
+                msg = 'Soubor nenalezen.'
             else:
                 ext = os.path.splitext(name)[1].lower()
                 try:
                     conn = sqlite3.connect('db.sqlite3')
                     cur = conn.cursor()
-
                     if ext == '.csv':
-                        # Try reading CSV with utf-8, fallback to cp1250
                         text = None
-                        for enc in ('utf-8', 'cp1250'):
+                        used_enc = None
+                        for enc in ('utf-8','cp1250'):
                             try:
-                                with open(path, 'r', encoding=enc) as f:
+                                with open(path,'r',encoding=enc) as f:
                                     text = f.read()
                                 used_enc = enc
                                 break
                             except Exception:
-                                text = None
+                                pass
                         if text is None:
-                            raise Exception('Cannot read CSV (utf-8/cp1250).')
-                        reader = csv.reader(io.StringIO(text))
-                        rows = list(reader)
+                            raise Exception('Nelze načíst CSV.')
+                        rdr = csv.reader(io.StringIO(text))
+                        rows = list(rdr)
                         if not rows:
-                            raise Exception('CSV file is empty.')
+                            raise Exception('CSV je prázdné.')
                         headers = [h.strip() for h in rows[0]]
                         data_rows = rows[1:]
-
-                        # infer column types
-                        def infer_type(values):
-                            is_int = True
-                            is_real = True
+                        def infer(values):
+                            is_int = True; is_real = True
                             for v in values:
-                                if v is None or v == '':
+                                if v in [None,'']:
                                     continue
                                 try:
                                     int(v)
@@ -1152,59 +1232,45 @@ def imports_view(request):
                             if is_real:
                                 return 'REAL'
                             return 'TEXT'
-
                         col_types = []
-                        for ci, h in enumerate(headers):
-                            vals = [r[ci] if ci < len(r) else '' for r in data_rows]
-                            col_types.append(infer_type(vals))
-
-                        # create table
-                        cols_def = ', '.join([f'"{h}" {t}' for h, t in zip(headers, col_types)])
+                        for i,h in enumerate(headers):
+                            vals = [r[i] if i < len(r) else '' for r in data_rows]
+                            col_types.append(infer(vals))
+                        cols_def = ', '.join([f'"{h}" {t}' for h,t in zip(headers,col_types)])
                         cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
                         cur.execute(f'CREATE TABLE "{table_name}" ({cols_def})')
-
-                        # prepare insert
-                        placeholders = ','.join(['?'] * len(headers))
-                        quoted_headers = [f'"{h}"' for h in headers]
-                        insert_sql = 'INSERT INTO "{}" ({}) VALUES ({})'.format(table_name, ', '.join(quoted_headers), placeholders)
-
-                        # insert rows, convert types where possible
+                        placeholders = ','.join(['?']*len(headers))
+                        quoted = ', '.join([f'"{h}"' for h in headers])
+                        ins = f'INSERT INTO "{table_name}" ({quoted}) VALUES ({placeholders})'
                         for r in data_rows:
-                            row = []
-                            for i, h in enumerate(headers):
-                                val = r[i] if i < len(r) else ''
+                            row_vals = []
+                            for j,h in enumerate(headers):
+                                val = r[j] if j < len(r) else ''
                                 if val == '':
-                                    row.append(None)
+                                    row_vals.append(None)
                                 else:
-                                    ctype = col_types[i]
-                                    if ctype == 'INTEGER':
-                                        try:
-                                            row.append(int(val))
-                                        except Exception:
-                                            row.append(None)
-                                    elif ctype == 'REAL':
-                                        try:
-                                            row.append(float(val))
-                                        except Exception:
-                                            row.append(None)
+                                    t = col_types[j]
+                                    if t == 'INTEGER':
+                                        try: row_vals.append(int(val))
+                                        except Exception: row_vals.append(None)
+                                    elif t == 'REAL':
+                                        try: row_vals.append(float(val))
+                                        except Exception: row_vals.append(None)
                                     else:
-                                        row.append(val)
-                            cur.execute(insert_sql, row)
+                                        row_vals.append(val)
+                            cur.execute(ins,row_vals)
                         conn.commit()
-                        msg = f'CSV converted into table "{table_name}" (encoding {used_enc}).'
-
+                        conn.close()
+                        msg = f'CSV převedeno do "{table_name}" (encoding {used_enc}).'
                     elif ext == '.json':
-                        with open(path, 'r', encoding='utf-8') as f:
+                        with open(path,'r',encoding='utf-8') as f:
                             data = json.load(f)
-                        # support list of objects or dict-of-lists
                         if isinstance(data, dict):
-                            # try to convert dict of lists to rows
                             keys = list(data.keys())
                             rows = list(zip(*[data[k] for k in keys]))
                             headers = keys
                             data_rows = [list(r) for r in rows]
                         elif isinstance(data, list):
-                            # list of objects
                             headers = []
                             for item in data:
                                 if isinstance(item, dict):
@@ -1213,97 +1279,77 @@ def imports_view(request):
                                             headers.append(k)
                             data_rows = []
                             for item in data:
-                                row = [item.get(h) for h in headers]
-                                data_rows.append(row)
+                                data_rows.append([item.get(h) for h in headers])
                         else:
-                            raise Exception('Unsupported JSON structure')
-
-                        # infer types
-                        def infer_type_json(values):
-                            is_int = True
-                            is_real = True
+                            raise Exception('Nepodporovaný JSON tvar.')
+                        def infer_json(values):
+                            is_int=True; is_real=True
                             for v in values:
-                                if v is None:
-                                    continue
-                                if isinstance(v, bool):
-                                    is_int = False
-                                    is_real = False
-                                    continue
-                                if isinstance(v, (int,)):
-                                    continue
-                                if isinstance(v, (float,)):
-                                    is_int = False
-                                    continue
-                                try:
-                                    int(v)
-                                except Exception:
-                                    is_int = False
-                                try:
-                                    float(v)
-                                except Exception:
-                                    is_real = False
-                            if is_int:
-                                return 'INTEGER'
-                            if is_real:
-                                return 'REAL'
+                                if v is None: continue
+                                if isinstance(v,bool):
+                                    is_int=False; is_real=False; continue
+                                if isinstance(v,int): continue
+                                if isinstance(v,float):
+                                    is_int=False; continue
+                                try: int(v)
+                                except Exception: is_int=False
+                                try: float(v)
+                                except Exception: is_real=False
+                            if is_int: return 'INTEGER'
+                            if is_real: return 'REAL'
                             return 'TEXT'
-
-                        col_types = []
-                        for ci, h in enumerate(headers):
-                            vals = [r[ci] if ci < len(r) else None for r in data_rows]
-                            col_types.append(infer_type_json(vals))
-
-                        cols_def = ', '.join([f'"{h}" {t}' for h, t in zip(headers, col_types)])
+                        col_types=[]
+                        for i,h in enumerate(headers):
+                            vals=[r[i] if i < len(r) else None for r in data_rows]
+                            col_types.append(infer_json(vals))
+                        conn = sqlite3.connect('db.sqlite3'); cur = conn.cursor()
+                        cols_def = ', '.join([f'"{h}" {t}' for h,t in zip(headers,col_types)])
                         cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
                         cur.execute(f'CREATE TABLE "{table_name}" ({cols_def})')
-
-                        placeholders = ','.join(['?'] * len(headers))
-                        quoted_headers = [f'"{h}"' for h in headers]
-                        insert_sql = 'INSERT INTO "{}" ({}) VALUES ({})'.format(table_name, ', '.join(quoted_headers), placeholders)
-
+                        placeholders = ','.join(['?']*len(headers))
+                        quoted = ', '.join([f'"{h}"' for h in headers])
+                        ins = f'INSERT INTO "{table_name}" ({quoted}) VALUES ({placeholders})'
                         for r in data_rows:
-                            row = []
-                            for i, h in enumerate(headers):
-                                val = r[i] if i < len(r) else None
+                            row_vals=[]
+                            for j,h in enumerate(headers):
+                                val = r[j] if j < len(r) else None
                                 if val is None:
-                                    row.append(None)
+                                    row_vals.append(None)
                                 else:
-                                    ctype = col_types[i]
-                                    if ctype == 'INTEGER':
-                                        try:
-                                            row.append(int(val))
-                                        except Exception:
-                                            row.append(None)
-                                    elif ctype == 'REAL':
-                                        try:
-                                            row.append(float(val))
-                                        except Exception:
-                                            row.append(None)
+                                    t = col_types[j]
+                                    if t == 'INTEGER':
+                                        try: row_vals.append(int(val))
+                                        except Exception: row_vals.append(None)
+                                    elif t == 'REAL':
+                                        try: row_vals.append(float(val))
+                                        except Exception: row_vals.append(None)
                                     else:
-                                        row.append(str(val))
-                            cur.execute(insert_sql, row)
-                        conn.commit()
-                        msg = f'JSON converted into table "{table_name}".'
+                                        row_vals.append(str(val))
+                            cur.execute(ins,row_vals)
+                        conn.commit(); conn.close()
+                        msg = f'JSON převeden do "{table_name}".'
                     else:
-                        msg = 'Unsupported file type for conversion. Only CSV and JSON supported.'
+                        msg = 'Podporovány jen CSV/JSON.'
                 except Exception as e:
-                    msg = f'Convert error: {e}'
+                    msg = f'Chyba konverze: {e}'
                 finally:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-
-    # prepare list of imported files
+                    try: conn.close()
+                    except Exception: pass
+    # Seznam souborů
     files = []
     for fn in sorted(os.listdir(imports_dir)):
         p = os.path.join(imports_dir, fn)
         if os.path.isfile(p):
             st = os.stat(p)
-            files.append({
-                'name': fn,
-                'size_kb': round(st.st_size/1024, 2),
-                'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
-            })
-
-    return render(request, 'import.html', {'imported_files': files, 'msg': msg, 'web_tables': web_tables, 'web_url': web_url, 'ote_tables': ote_tables, 'ote_url': ote_url, 'ote_date': ote_date, 'ote_time_resolution': ote_time_resolution, 'import_logs': IMPORT_LOGS})
+            files.append({'name': fn, 'size_kb': round(st.st_size/1024,2), 'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))})
+    return render(request, 'import.html', {
+        'imported_files': files,
+        'msg': msg,
+        'web_tables': web_tables,
+        'web_url': web_url,
+        'ote_tables': ote_tables,
+        'ote_url': ote_url,
+        'ote_date': ote_date,
+        'ote_time_resolution': ote_time_resolution,
+        'import_logs': IMPORT_LOGS
+    })

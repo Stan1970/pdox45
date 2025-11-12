@@ -1,0 +1,78 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Import preview</h2>
+<p>{{ msg }}</p>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="source_kind" value="{{ source_kind }}">
+  <input type="hidden" name="source_url" value="{{ source_url }}">
+  <input type="hidden" name="source_index" value="{{ source_index }}">
+  <input type="hidden" name="suggest_name" value="{{ suggest_name }}">
+  <table border="1" cellpadding="6" cellspacing="0" style="width:100%; background:#111; color:#EDEDED;">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Current name</th>
+        <th>New name</th>
+        <th>Detected type</th>
+        <th>Forced type</th>
+        <th>Number format</th>
+        <th>Date format</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for col in columns %}
+      <tr>
+        <td>{{ forloop.counter }}</td>
+        <td>{{ col.current }}</td>
+        <td>
+          <input type="text" name="rename_{{ forloop.counter0 }}" value="{{ col.new }}" style="width:180px">
+        </td>
+        <td>{{ col.detected }}</td>
+        <td>
+          <select name="force_{{ forloop.counter0 }}">
+            {% if not col.forced %}
+            <option value="" selected>auto</option>
+            {% else %}
+            <option value="">auto</option>
+            {% endif %}
+            <option value="INTEGER">INTEGER</option>
+            <option value="REAL">REAL</option>
+            <option value="TEXT">TEXT</option>
+            <option value="DATE">DATE</option>
+            <option value="DATETIME">DATETIME</option>
+          </select>
+        </td>
+        <td>
+          <select name="numfmt_{{ forloop.counter0 }}">
+            <option value="auto">auto</option>
+            <option value="cz">1 234,56</option>
+            <option value="us">1,234.56</option>
+          </select>
+        </td>
+        <td>
+          <select name="datefmt_{{ forloop.counter0 }}">
+            <option value="auto">auto</option>
+            <option value="iso">YYYY-MM-DD</option>
+            <option value="iso_dt">YYYY-MM-DD HH:MM:SS</option>
+            <option value="cz">DD.MM.YYYY</option>
+            <option value="cz_dt">DD.MM.YYYY HH:MM:SS</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+    <label>Název cílové tabulky:</label>
+    <input type="text" name="final_table_name" value="{{ suggest_name }}">
+    <button type="submit" name="confirm_import" value="1">Importovat</button>
+    <a href="{% url 'import' %}" class="btn">Zpět</a>
+  </div>
+</form>
+<hr>
+<h3>Náhled dat (prvních 20 řádků)</h3>
+<div style="max-height:300px; overflow:auto; border:1px solid #444;">
+  {{ preview_table|safe }}
+</div>
+{% endblock %}

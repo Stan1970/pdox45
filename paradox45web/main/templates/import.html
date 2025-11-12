@@ -24,8 +24,7 @@
         <thead>
             <tr>
                 <th>#</th>
-                <th>Náhled</th>
-                <th>Akce</th>
+                <th>Tabulka</th>
             </tr>
         </thead>
         <tbody>
@@ -33,18 +32,19 @@
             <tr>
                 <td style="white-space:nowrap">{{ forloop.counter0 }}</td>
                 <td>
+                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px; min-width:240px; flex-wrap:wrap;">
+                        <form method="post" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                            {% csrf_token %}
+                            <input type="hidden" name="web_url" value="{{ web_url }}">
+                            <input type="hidden" name="import_web_index" value="{{ forloop.counter0 }}">
+                            <input type="text" name="import_web_table" placeholder="Název cílové tabulky" value="{{ wt.suggest }}">
+                            <button type="submit" name="prepare_web" value="1">Připravit</button>
+                            <button type="submit" name="import_web" value="1">Importovat</button>
+                        </form>
+                    </div>
                     <div style="max-height:200px; overflow:auto; border:1px solid #444;">
                         {{ wt.preview|safe }}
                     </div>
-                </td>
-                <td style="min-width:240px">
-                    <form method="post" style="display:flex; gap:6px; align-items:center;">
-                        {% csrf_token %}
-                        <input type="hidden" name="web_url" value="{{ web_url }}">
-                        <input type="hidden" name="import_web_index" value="{{ forloop.counter0 }}">
-                        <input type="text" name="import_web_table" placeholder="Název cílové tabulky" value="{{ wt.suggest }}">
-                        <button type="submit" name="import_web" value="1">Importovat</button>
-                    </form>
                 </td>
             </tr>
         {% endfor %}
@@ -83,6 +83,7 @@
                         <input type="hidden" name="ote_time_resolution" value="{{ ote_time_resolution }}">
                         <input type="hidden" name="import_ote_index" value="{{ forloop.counter0 }}">
                         <input type="text" name="import_ote_table" placeholder="Název tabulky" value="{{ ot.suggest }}">
+                        <button type="submit" name="prepare_ote" value="1">Připravit</button>
                         <button type="submit" name="import_ote" value="1">Importovat</button>
                     </form>
                 </td>
