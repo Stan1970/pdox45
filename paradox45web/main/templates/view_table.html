@@ -4,20 +4,29 @@
 {% if error %}
     <p style="color:red;">Error: {{ error }}</p>
 {% elif columns and rows %}
-    <table border="1" cellpadding="4" style="font-family: Courier New, monospace; background:#111; color:#EDEDED; border-collapse:collapse;">
-        <tr style="background:#444;">
-            {% for col in columns %}
-                <th>{{ col }}</th>
-            {% endfor %}
-        </tr>
-        {% for row in rows %}
-        <tr>
-            {% for cell in row %}
-                <td>{{ cell }}</td>
-            {% endfor %}
-        </tr>
-        {% endfor %}
-    </table>
+    <style>
+      .table-scroll-x { overflow-x:auto; overflow-y:hidden; border:1px solid #444; background:#111; }
+      .table-scroll-x table { min-width: max-content; border-collapse: collapse; }
+      .table-scroll-x::-webkit-scrollbar { height: 10px; }
+      .table-scroll-x::-webkit-scrollbar-thumb { background: #555; }
+      .table-scroll-x::-webkit-scrollbar-track { background: #222; }
+    </style>
+    <div class="table-scroll-x">
+      <table border="1" cellpadding="4" style="font-family: Courier New, monospace; background:#111; color:#EDEDED; border-collapse:collapse;">
+          <tr style="background:#444;">
+              {% for col in columns %}
+                  <th>{{ col }}</th>
+              {% endfor %}
+          </tr>
+          {% for row in rows %}
+          <tr>
+              {% for cell in row %}
+                  <td>{{ cell }}</td>
+              {% endfor %}
+          </tr>
+          {% endfor %}
+      </table>
+    </div>
 {% else %}
     <p>No data found in this table.</p>
 {% endif %}

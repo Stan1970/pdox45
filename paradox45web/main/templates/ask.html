@@ -14,6 +14,14 @@
 <h2>Table structure: {{ table_name }}</h2>
 <form method="post">
 {% csrf_token %}
+<style>
+  .table-scroll-x { overflow-x:auto; overflow-y:hidden; border:1px solid #444; background:#111; margin-bottom:8px; }
+  .table-scroll-x table { min-width:max-content; border-collapse:collapse; }
+  .table-scroll-x::-webkit-scrollbar { height: 10px; }
+  .table-scroll-x::-webkit-scrollbar-thumb { background: #555; }
+  .table-scroll-x::-webkit-scrollbar-track { background: #222; }
+</style>
+<div class="table-scroll-x">
 <table border="1" cellpadding="4" style="background:#111; color:#EDEDED;">
     <tr>
         <th>ID</th>
@@ -70,6 +78,7 @@
     </tr>
     {% endfor %}
 </table>
+</div>
 <button type="submit">Create ANSWER</button>
 </form>
 <script>
@@ -90,6 +99,8 @@
         .answer-actions button { padding:6px 10px; cursor:pointer; }
         .answer-table { width:100%; border-collapse:collapse; }
         .answer-table th, .answer-table td { border:1px solid #555; padding:4px 6px; }
+        .table-scroll-x { overflow-x:auto; overflow-y:hidden; border:1px solid #444; background:#111; margin-top:6px; }
+        .table-scroll-x table { min-width:max-content; border-collapse:collapse; }
         /* Modal pro informaci o uložení */
         .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; z-index:1000; }
         .modal { background:#222; color:#EDEDED; border:1px solid #555; border-radius:6px; padding:14px 16px; max-width:520px; width:90%; box-shadow:0 6px 24px rgba(0,0,0,.4); }
@@ -117,20 +128,22 @@
                 <input type="hidden" name="table" value="{{ table_name }}">
             </form>
         </div>
-        <table class="answer-table">
-            <tr>
-                {% for col in answer_columns %}
-                    <th>{{ col }}</th>
-                {% endfor %}
-            </tr>
-            {% for row in answer_rows %}
-            <tr>
-                {% for cell in row %}
-                    <td>{{ cell }}</td>
-                {% endfor %}
-            </tr>
-            {% endfor %}
-        </table>
+        <div class="table-scroll-x">
+          <table class="answer-table">
+              <tr>
+                  {% for col in answer_columns %}
+                      <th>{{ col }}</th>
+                  {% endfor %}
+              </tr>
+              {% for row in answer_rows %}
+              <tr>
+                  {% for cell in row %}
+                      <td>{{ cell }}</td>
+                  {% endfor %}
+              </tr>
+              {% endfor %}
+          </table>
+        </div>
     </div>
     <!-- skrytý iframe pro stahování -->
     <iframe id="download_iframe" name="download_iframe" style="display:none;"></iframe>
@@ -164,7 +177,7 @@
             return '~/Downloads (nebo ~/Stažené)';
           }
           if (platform.indexOf('win') !== -1) {
-            return 'C\\\\Users\\<vaše_jméno>\\Downloads';
+            return 'C\\\Users\\<vaše_jméno>\\Downloads';
           }
           if (platform.indexOf('mac') !== -1 || ua.indexOf('mac os') !== -1) {
             return '/Users/<vaše_jméno>/Downloads';
