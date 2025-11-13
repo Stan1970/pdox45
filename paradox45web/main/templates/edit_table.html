@@ -31,6 +31,9 @@
 .table-scroll th, .table-scroll td { border: 1px solid #555; padding: 6px; }
 .table-scroll th { position: sticky; top: 0; background: #111; z-index: 10; }
 .actions-cell button { background:none; border:1px solid #c00; color:#c00; padding:4px; cursor:pointer; }
+.actions-wrap { display:flex; gap:8px; align-items:center; }
+.viewlink { color:#9EE7FF; text-decoration:none; font-size:16px; }
+.viewlink:hover { text-decoration:underline; }
 .save-bar { margin-top: 14px; text-align: right; }
 .save-btn { padding:8px 14px; background:#2b5; border:1px solid #2b5; color:#fff; }
 .status-msg { color:yellow; margin:0; }
@@ -79,14 +82,20 @@
         <table cellpadding="0" cellspacing="0">
           <thead>
             <tr>
+              <th>Actions</th>
               <th>#</th>
               {% for col in cols %}<th>{{ col }}</th>{% endfor %}
-              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {% for row in rows %}
             <tr>
+              <td class="actions-cell">
+                <div class="actions-wrap">
+                  <a class="viewlink" href="{% url 'edit_row' table_name row.rowid %}" title="Detail">&#128279;</a>
+                  <button type="button" onclick="submitDelete({{ row.rowid }})" title="Delete" aria-label="Delete">&#128465;</button>
+                </div>
+              </td>
               <td>{{ forloop.counter }}</td>
               {% for cell in row.cells %}
               <td>
@@ -103,9 +112,6 @@
                 {% endif %}
               </td>
               {% endfor %}
-              <td class="actions-cell">
-                <button type="button" onclick="submitDelete({{ row.rowid }})" title="Delete" aria-label="Delete">&#128465;</button>
-              </td>
             </tr>
             {% endfor %}
           </tbody>

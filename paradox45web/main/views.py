@@ -1,4 +1,4 @@
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 import sqlite3
 import os
 import time
@@ -1353,3 +1353,112 @@ def imports_view(request):
         'ote_time_resolution': ote_time_resolution,
         'import_logs': IMPORT_LOGS
     })
+
+
+def edit_row(request, table_name, rowid):
+    # ochrana systémových tabulek
+    if table_name in EXCLUDED_TABLES:
+        return render(request, 'view.html', {'tables': [], 'msg': f'Cannot edit system table "{table_name}".'})
+    conn = sqlite3.connect('db.sqlite3')
+    cur = conn.cursor()
+    try:
+        # metadata a aktuální řádek
+        cur.execute(f'PRAGMA table_info("{table_name}")')
+        cols_info = cur.fetchall()
+        cols = [c[1] for c in cols_info]
+        types = {c[1]: (c[2] or '').upper() for c in cols_info}
+        # sousedé pro navigaci
+        cur.execute(f'SELECT rowid FROM "{table_name}" ORDER BY rowid')
+        all_ids = [r[0] for r in cur.fetchall()]
+        prev_rowid = None; next_rowid = None
+        if all_ids:
+            try:
+                pos = all_ids.index(rowid)
+                if pos > 0:
+                    prev_rowid = all_ids[pos-1]
+                if pos < len(all_ids)-1:
+                    next_rowid = all_ids[pos+1]
+            except ValueError:
+                pass
+        # načíst řádek
+        cur.execute(f'SELECT rowid, * FROM "{table_name}" WHERE rowid = ?', (rowid,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return render(request, 'view.html', {'tables': [], 'msg': f'Row {rowid} not found in {table_name}.'})
+        # sestavit buňky
+        row_cells = []
+        for i, c in enumerate(cols, start=1):
+            row_cells.append({'idx': i-1, 'name': c, 'type': types[c], 'val': row[i], 'error': False, 'error_msg': ''})
+        msg = ''
+        if request.method == 'POST':
+            # delete akce
+            if request.POST.get('delete'):
+                try:
+                    cur.execute(f'DELETE FROM "{table_name}" WHERE rowid = ?', (rowid,))
+                    conn.commit()
+                    conn.close()
+                    return redirect('edit_table', table_name=table_name)
+                except Exception as e:
+                    msg = f'Error deleting row: {e}'
+            else:
+                # save s validací
+                has_errors = False
+                set_parts = []
+                params = []
+                for cell in row_cells:
+                    raw = request.POST.get(f'cell_{cell["idx"]}', '')
+                    display_val = raw
+                    t = cell['type']
+                    val = None
+                    err = ''
+                    if raw == '':
+                        val = None
+                    elif 'INT' in t and not ('CHAR' in t or 'TEXT' in t):
+                        try:
+                            val = int(float(str(raw).replace(',', '.')))
+                        except Exception:
+                            err = 'Expected INTEGER'
+                    elif any(k in t for k in ['REAL','FLOA','NUM','DEC','DOUB']):
+                        try:
+                            val = float(str(raw).replace(' ', '').replace('\xa0',' ').replace(',', '.'))
+                        except Exception:
+                            err = 'Expected REAL number'
+                    else:
+                        val = raw
+                    if err:
+                        cell['error'] = True
+                        cell['error_msg'] = err
+                        has_errors = True
+                        # ponechat zadaný text v poli
+                        cell['val'] = display_val
+                    else:
+                        set_parts.append(f'"{cell["name"]}" = ?')
+                        params.append(val)
+                        # zobrazit normalizovanou hodnotu
+                        cell['val'] = display_val
+                if has_errors:
+                    msg = 'Please fix highlighted fields.'
+                else:
+                    params.append(rowid)
+                    cur.execute(f'UPDATE "{table_name}" SET {", ".join(set_parts)} WHERE rowid = ?', params)
+                    conn.commit()
+                    msg = 'Row updated.'
+                    # znovu načíst a zobrazit DB hodnoty
+                    cur.execute(f'SELECT rowid, * FROM "{table_name}" WHERE rowid = ?', (rowid,))
+                    row = cur.fetchone()
+                    row_cells = []
+                    for i, c in enumerate(cols, start=1):
+                        row_cells.append({'idx': i-1, 'name': c, 'type': types[c], 'val': row[i], 'error': False, 'error_msg': ''})
+        conn.close()
+        return render(request, 'edit_row.html', {
+            'table_name': table_name,
+            'rowid': rowid,
+            'row_cells': row_cells,
+            'prev_rowid': prev_rowid,
+            'next_rowid': next_rowid,
+            'msg': msg,
+        })
+    except Exception as e:
+        conn.close()
+        return render(request, 'view.html', {'tables': [], 'msg': f'Error: {e}'})

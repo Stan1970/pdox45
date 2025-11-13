@@ -1,0 +1,127 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+.fixed-edit-wrapper { position: fixed; top:34px; left:0; right:0; bottom:0; background:#222; overflow:auto; z-index:60; }
+.fixed-edit-inner { max-width: 700px; margin: 0 auto; padding: 14px; }
+.header-row { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+.header-row h1 { margin:0; }
+.form-vert { border:1px solid #444; padding:12px; }
+.form-vert .row { display:grid; grid-template-columns: 220px 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #333; }
+.form-vert .row:last-child { border-bottom:none; }
+.form-vert label { color:#9EE7FF; }
+.form-vert input[type=text], .form-vert input[type=number] { width:100%; padding:6px; background:#111; color:#eee; border:1px solid #555; }
+.form-vert input.error { border-color: #c00; background:#2a1717; }
+.field-error { color:#ff9c9c; font-size: 12px; margin-top: 2px; }
+.nav-row { display:flex; justify-content: space-between; align-items:center; margin-bottom:10px; }
+.nav-row .link { padding:4px 8px; border:1px solid #555; background:#111; }
+.actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+.btn { padding:8px 14px; border:1px solid #2b5; background:#2b5; color:#fff; cursor:pointer; text-decoration:none; }
+.link { color:#9EE7FF; text-decoration:none; }
+.link:hover { text-decoration:underline; }
+.status-msg { color:yellow; }
+</style>
+<div class="fixed-edit-wrapper">
+  <div class="fixed-edit-inner">
+    <div class="header-row">
+      <h1>Edit row: {{ table_name }} (rowid={{ rowid }})</h1>
+      {% if msg %}<p class="status-msg">{{ msg }}</p>{% endif %}
+    </div>
+    <div class="nav-row">
+      <div>
+        <a class="link nav-leave nav-back" href="{% url 'edit_table' table_name %}">← Back to table</a>
+      </div>
+      <div>
+        {% if prev_rowid %}
+          <a class="link nav-leave nav-prev" href="{% url 'edit_row' table_name prev_rowid %}">« Previous</a>
+        {% endif %}
+        {% if next_rowid %}
+          <a class="link nav-leave nav-next" href="{% url 'edit_row' table_name next_rowid %}">Next »</a>
+        {% endif %}
+      </div>
+    </div>
+    <form method="post" class="form-vert">
+      {% csrf_token %}
+      {% for cell in row_cells %}
+        <div class="row">
+          <label>{{ cell.name }}</label>
+          {% if cell.type and 'INT' in cell.type %}
+            <input type="number" name="cell_{{ cell.idx }}" value="{{ cell.val }}" step="1" class="{% if cell.error %}error{% endif %}">
+          {% elif cell.type and 'REAL' in cell.type %}
+            <input type="number" name="cell_{{ cell.idx }}" value="{{ cell.val }}" step="any" class="{% if cell.error %}error{% endif %}">
+          {% elif cell.type and 'FLOA' in cell.type %}
+            <input type="number" name="cell_{{ cell.idx }}" value="{{ cell.val }}" step="any" class="{% if cell.error %}error{% endif %}">
+          {% elif cell.type and 'NUM' in cell.type %}
+            <input type="number" name="cell_{{ cell.idx }}" value="{{ cell.val }}" step="any" class="{% if cell.error %}error{% endif %}">
+          {% elif cell.type and 'DEC' in cell.type %}
+            <input type="number" name="cell_{{ cell.idx }}" value="{{ cell.val }}" step="any" class="{% if cell.error %}error{% endif %}">
+          {% elif cell.type and 'DOUB' in cell.type %}
+            <input type="number" name="cell_{{ cell.idx }}" value="{{ cell.val }}" step="any" class="{% if cell.error %}error{% endif %}">
+          {% else %}
+            <input type="text" name="cell_{{ cell.idx }}" value="{{ cell.val }}" class="{% if cell.error %}error{% endif %}">
+          {% endif %}
+          {% if cell.error and cell.error_msg %}
+            <div class="field-error">{{ cell.error_msg }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+      <div class="actions">
+        <button type="submit" class="btn" name="save" value="1">Save</button>
+        <button type="submit" class="btn" name="delete" value="1" onclick="return confirm('Delete this row?')" style="background:#b22;border-color:#b22">Delete</button>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+(function(){
+  let dirty = false;
+  const form = document.querySelector('.form-vert');
+  const inputs = form ? form.querySelectorAll('input') : [];
+  inputs.forEach(inp => {
+    inp.dataset.initial = inp.value || '';
+    const mark = () => { if (!dirty && (inp.value || '') !== inp.dataset.initial) dirty = true; };
+    inp.addEventListener('input', mark);
+    inp.addEventListener('change', mark);
+  });
+  if (form) {
+    form.addEventListener('submit', function(){ dirty = false; window.onbeforeunload = null; });
+  }
+  function confirmLeave(){
+    if (!dirty) return true;
+    return confirm('Máte neuložené změny. Opravdu chcete opustit stránku?');
+  }
+  document.querySelectorAll('a.nav-leave').forEach(a => {
+    a.addEventListener('click', function(ev){
+      if (!confirmLeave()) { ev.preventDefault(); }
+    });
+  });
+  function isEditable(el){
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+  document.addEventListener('keydown', function(e){
+    if (isEditable(document.activeElement)) return;
+    if (e.key === 'ArrowLeft') {
+      const prev = document.querySelector('a.nav-prev');
+      if (prev) {
+        if (!dirty || confirm('Máte neuložené změny. Opravdu chcete opustit stránku?')) {
+          window.location = prev.href;
+        }
+      }
+    } else if (e.key === 'ArrowRight') {
+      const next = document.querySelector('a.nav-next');
+      if (next) {
+        if (!dirty || confirm('Máte neuložené změny. Opravdu chcete opustit stránku?')) {
+          window.location = next.href;
+        }
+      }
+    }
+  });
+  window.addEventListener('beforeunload', function(e){
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+})();
+</script>
+{% endblock %}
